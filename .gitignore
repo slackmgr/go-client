@@ -1,19 +1,49 @@
-.idea/**/*
-.gradle/**/*
-.vscode/**/*
-**/.vscode/**/*
-data/**/*
-dist/**/*
-data
-bin
-debug*.txt
-profiling/
-profile*.pdf
-tmp_data/
-example.sh
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+out/
+target/
+slack-manager
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Hidden system files
+.DS_Store
+Thumbs.db
+
+# env file and secrets
+.env
 secrets/
-.dccache
-foo.json
 *.decrypted_backup
 *.encrypted_backup
 .decrypted*
+
+# IDE stuff
+.idea/
+.gradle/
+.vscode/
+.dccache
+
+# Debug and temp files
+*.log
+*.lock
+*.temp
+*.tmp
+*.debug
+debug*.txt
+
+# Profiling
+profiling/
+profile*.pdf

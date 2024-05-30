@@ -4,8 +4,8 @@ github.com/go-resty/resty/v2 v2.13.1 h1:x+LHXBI2nMB1vqndymf26quycC4aggYJ7DECYbiz
 github.com/go-resty/resty/v2 v2.13.1/go.mod h1:GznXlLxkq6Nh4sU59rPmUw3VtgpO3aS96ORAI6Q7d+0=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/peteraglen/slack-manager-common v0.0.13 h1:flMMjEmfDqSeo6znKAXJGO/RHj8Lrvc/2twenkouWSU=
-github.com/peteraglen/slack-manager-common v0.0.13/go.mod h1:GpNm17zO1nhnqsuGJAnIUy4Q/tjTS09C9jgMz2UKXqs=
+github.com/peteraglen/slack-manager-common v0.0.21 h1:aN+/9YIdB243QG6mxOU++L+bItg36LLy63vj+R9iZQw=
+github.com/peteraglen/slack-manager-common v0.0.21/go.mod h1:GpNm17zO1nhnqsuGJAnIUy4Q/tjTS09C9jgMz2UKXqs=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
