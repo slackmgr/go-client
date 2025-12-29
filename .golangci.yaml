@@ -1,53 +1,75 @@
-# https://golangci-lint.run/usage/configuration/
+version: "2"
 run:
   tests: true
-  timeout: 1m
 linters:
-  disable-all: false
-  enable-all: true
+  default: all
   disable:
-    - lll # lll is a linter that reports long lines
-    - err113 # check the errors handling expressions
-    - wsl # wsl is a linter that checks for whitespace at the end of lines
-    - mnd # An analyzer to detect magic numbers
-    - cyclop # Calculates the cyclomatic complexity of functions
-    - gocyclo # Calculate cyclomatic complexities of functions in Go source code
-    - execinquery # Deprecated
-    - exhaustruct # Finds structures with uninitialized fields
-    - wrapcheck # Check that errors are wrapped correctly
-    - funlen # Reports functions that are too long
-    - depguard # Go linter that checks if package imports are in a list of acceptable packages
-    - dupl # Tool for code clone detection
-    - gocognit # Computes and checks the cognitive complexity of functions
-    - godot # Check if comments end in a period
-    - gomnd # An analyzer to detect magic numbers
-    - gomodguard # Allow and block list linter for direct Go module dependencies. This is different from depguard where there are different block types for example version constraints and module recommendations.
-    - interfacebloat # A linter that checks the number of methods inside an interface.
-    - maintidx # maintidx measures the maintainability index of each function.
-    - nestif # Reports deeply nested if statements
-    - nlreturn # nlreturn checks for a new line before return and branch statements to increase code clarity
-    - sqlclosecheck # Checks that sql.Rows and sql.Stmt are closed.
-    - varnamelen # checks that the length of a variable's name matches its scope
-linters-settings:
-  asasalint:
-    use-builtin-exclusions: true
-    ignore-test: true
-  goconst:
-    ignore-tests: true
-  ireturn:
-    allow:
-      - anon
-      - error
-      - empty
-      - stdlib
-      - generic
-issues:
-  exclude-dirs:
-    - testdata
-    - bin
-  exclude-rules:
-    - path: _test\.go # Skip certain linters in test files
-      linters:
-        - revive
-        - gochecknoglobals
-        - gosec
+    - cyclop
+    - depguard
+    - dupl
+    - err113
+    - exhaustruct
+    - funlen
+    - gocognit
+    - gocyclo
+    - godot
+    - gomodguard
+    - interfacebloat
+    - lll
+    - maintidx
+    - mnd
+    - nestif
+    - nlreturn
+    - noinlineerr
+    - sqlclosecheck
+    - varnamelen
+    - wrapcheck
+    - wsl
+    - wsl_v5
+  settings:
+    asasalint:
+      use-builtin-exclusions: true
+    ireturn:
+      allow:
+        - anon
+        - error
+        - empty
+        - stdlib
+        - generic
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gochecknoglobals
+          - gosec
+          - revive
+        path: _test\.go
+      - linters:
+          - asasalint
+          - goconst
+        path: (.+)_test\.go
+    paths:
+      - testdata
+      - bin
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - testdata
+      - bin
+      - third_party$
+      - builtin$
+      - examples$
