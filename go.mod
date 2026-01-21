@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/go-resty/resty/v2 v2.17.1
-	github.com/peteraglen/slack-manager-common v0.1.3
+	github.com/peteraglen/slack-manager-common v0.1.4
 )
 
 require (
