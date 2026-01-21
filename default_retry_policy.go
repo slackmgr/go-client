@@ -3,20 +3,31 @@ package client
 import (
 	"context"
 	"errors"
-	"strings"
+	"net"
 
 	"github.com/go-resty/resty/v2"
 )
 
+// DefaultRetryPolicy determines whether a failed request should be retried.
+// It retries on connection errors (except context cancellation, deadline exceeded,
+// and DNS resolution failures) and on HTTP 429 (rate limit) or 5xx server errors.
 func DefaultRetryPolicy(r *resty.Response, err error) bool {
-	// Retry on all connection errors, except for when the context is canceled or deadline exceeded
-	// Also skip retries on DNS resolution errors.
 	if err != nil {
-		return !errors.Is(err, context.Canceled) &&
-			!errors.Is(err, context.DeadlineExceeded) &&
-			!strings.Contains(err.Error(), "no such host")
+		// Don't retry on context cancellation or deadline exceeded
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+
+		// Don't retry on DNS resolution errors
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return false
+		}
+
+		// Retry on other connection errors
+		return true
 	}
 
-	// Retry on 429 and 5xx errors
+	// Retry on 429 (rate limit) and 5xx (server errors)
 	return r.StatusCode() == 429 || r.StatusCode() >= 500
 }

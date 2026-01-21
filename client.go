@@ -5,21 +5,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/go-resty/resty/v2"
 	common "github.com/peteraglen/slack-manager-common"
 )
 
+// Client is an HTTP client for sending alerts to the Slack Manager API.
+// Use New to create a Client, then call Connect to establish the connection.
 type Client struct {
 	baseURL string
 	client  *resty.Client
 	options *Options
+	once    sync.Once
 }
 
 type alertsList struct {
 	Alerts []*common.Alert `json:"alerts"`
 }
 
+// New creates a new Client with the given base URL and options.
+// The client must be connected with Connect before sending alerts.
 func New(baseURL string, opts ...Option) *Client {
 	options := newClientOptions()
 
@@ -33,44 +39,69 @@ func New(baseURL string, opts ...Option) *Client {
 	}
 }
 
-func (c *Client) Connect(ctx context.Context) (*Client, error) {
-	if c.baseURL == "" {
-		return nil, errors.New("base URL must be set")
-	}
+// Connect initializes the HTTP client and validates connectivity by pinging the API.
+// This method is safe for concurrent use and will only initialize once.
+func (c *Client) Connect(ctx context.Context) error {
+	var connectErr error
 
-	c.client = resty.New().
-		SetBaseURL(c.baseURL).
-		SetRetryCount(c.options.retryCount).
-		SetRetryWaitTime(c.options.retryWaitTime).
-		SetRetryMaxWaitTime(c.options.retryMaxWaitTime).
-		AddRetryCondition(c.options.retryPolicy).
-		SetLogger(c.options.requestLogger)
+	c.once.Do(func() {
+		if c.baseURL == "" {
+			connectErr = errors.New("base URL must be set")
+			return
+		}
 
-	for key, value := range c.options.requestHeaders {
-		c.client.SetHeader(key, value)
-	}
+		if err := c.options.Validate(); err != nil {
+			connectErr = fmt.Errorf("invalid options: %w", err)
+			return
+		}
 
-	if c.options.basicAuthUsername != "" {
-		c.client.SetBasicAuth(c.options.basicAuthUsername, c.options.basicAuthPassword)
-	} else if c.options.authToken != "" {
-		c.client.SetAuthScheme(c.options.authScheme)
-		c.client.SetAuthToken(c.options.authToken)
-	}
+		c.client = resty.New().
+			SetBaseURL(c.baseURL).
+			SetRetryCount(c.options.retryCount).
+			SetRetryWaitTime(c.options.retryWaitTime).
+			SetRetryMaxWaitTime(c.options.retryMaxWaitTime).
+			AddRetryCondition(c.options.retryPolicy).
+			SetLogger(c.options.requestLogger)
 
-	if err := c.ping(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ping alerts API: %w", err)
-	}
+		for key, value := range c.options.requestHeaders {
+			c.client.SetHeader(key, value)
+		}
 
-	return c, nil
+		if c.options.basicAuthUsername != "" {
+			c.client.SetBasicAuth(c.options.basicAuthUsername, c.options.basicAuthPassword)
+		} else if c.options.authToken != "" {
+			c.client.SetAuthScheme(c.options.authScheme)
+			c.client.SetAuthToken(c.options.authToken)
+		}
+
+		if err := c.ping(ctx); err != nil {
+			connectErr = fmt.Errorf("failed to ping alerts API: %w", err)
+			return
+		}
+	})
+
+	return connectErr
 }
 
+// Send posts one or more alerts to the API. Connect must be called first.
+// Returns an error if any alert in the slice is nil.
 func (c *Client) Send(ctx context.Context, alerts ...*common.Alert) error {
 	if c == nil {
 		return errors.New("alert client is nil")
 	}
 
+	if c.client == nil {
+		return errors.New("client not connected - call Connect() first")
+	}
+
 	if len(alerts) == 0 {
 		return errors.New("alerts list cannot be empty")
+	}
+
+	for i, alert := range alerts {
+		if alert == nil {
+			return fmt.Errorf("alert at index %d is nil", i)
+		}
 	}
 
 	alertsInput := &alertsList{
@@ -94,7 +125,7 @@ func (c *Client) get(ctx context.Context, path string) error {
 
 	response, err := request.Get(path)
 	if err != nil {
-		return fmt.Errorf("GET %s failed: %w", response.Request.URL, err)
+		return fmt.Errorf("GET %s failed: %w", path, err)
 	}
 
 	if !response.IsSuccess() {
@@ -109,7 +140,7 @@ func (c *Client) post(ctx context.Context, path string, body []byte) error {
 
 	response, err := request.Post(path)
 	if err != nil {
-		return fmt.Errorf("POST %s failed: %w", response.Request.URL, err)
+		return fmt.Errorf("POST %s failed: %w", path, err)
 	}
 
 	if !response.IsSuccess() {
