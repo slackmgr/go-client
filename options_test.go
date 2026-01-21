@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/tls"
 	"testing"
 	"time"
 
@@ -66,6 +67,22 @@ func TestNewClientOptions(t *testing.T) {
 
 	if opts.maxRedirects != 10 {
 		t.Errorf("expected maxRedirects=10, got %d", opts.maxRedirects)
+	}
+
+	if opts.authScheme != "Bearer" {
+		t.Errorf("expected authScheme=Bearer, got %s", opts.authScheme)
+	}
+
+	if opts.alertsEndpoint != "alerts" {
+		t.Errorf("expected alertsEndpoint=alerts, got %s", opts.alertsEndpoint)
+	}
+
+	if opts.pingEndpoint != "ping" {
+		t.Errorf("expected pingEndpoint=ping, got %s", opts.pingEndpoint)
+	}
+
+	if opts.tlsConfig != nil {
+		t.Errorf("expected tlsConfig=nil, got %v", opts.tlsConfig)
 	}
 }
 
@@ -614,6 +631,16 @@ func TestOptionsValidate(t *testing.T) {
 			modify:    func(o *Options) { o.maxRedirects = 21 },
 			wantError: "maxRedirects must not exceed 20",
 		},
+		{
+			name:      "empty alertsEndpoint",
+			modify:    func(o *Options) { o.alertsEndpoint = "" },
+			wantError: "alertsEndpoint must not be empty",
+		},
+		{
+			name:      "empty pingEndpoint",
+			modify:    func(o *Options) { o.pingEndpoint = "" },
+			wantError: "pingEndpoint must not be empty",
+		},
 	}
 
 	for _, tt := range tests {
@@ -637,5 +664,103 @@ func TestOptionsValidate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWithTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid config", func(t *testing.T) {
+		t.Parallel()
+
+		opts := newClientOptions()
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		WithTLSConfig(tlsConfig)(opts)
+
+		if opts.tlsConfig != tlsConfig {
+			t.Error("expected tlsConfig to be set")
+		}
+	})
+
+	t.Run("nil ignored", func(t *testing.T) {
+		t.Parallel()
+
+		opts := newClientOptions()
+		opts.tlsConfig = &tls.Config{}
+		originalConfig := opts.tlsConfig
+		WithTLSConfig(nil)(opts)
+
+		if opts.tlsConfig != originalConfig {
+			t.Error("nil config should be ignored")
+		}
+	})
+}
+
+func TestWithAlertsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"valid endpoint", "v2/alerts", "v2/alerts"},
+		{"empty ignored", "", "alerts"},
+		{"whitespace ignored", "   ", "alerts"},
+		{"whitespace trimmed", "  api/alerts  ", "api/alerts"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := newClientOptions()
+			WithAlertsEndpoint(tt.input)(opts)
+
+			if opts.alertsEndpoint != tt.expected {
+				t.Errorf("expected alertsEndpoint=%s, got %s", tt.expected, opts.alertsEndpoint)
+			}
+		})
+	}
+}
+
+func TestWithPingEndpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"valid endpoint", "health", "health"},
+		{"empty ignored", "", "ping"},
+		{"whitespace ignored", "   ", "ping"},
+		{"whitespace trimmed", "  healthz  ", "healthz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := newClientOptions()
+			WithPingEndpoint(tt.input)(opts)
+
+			if opts.pingEndpoint != tt.expected {
+				t.Errorf("expected pingEndpoint=%s, got %s", tt.expected, opts.pingEndpoint)
+			}
+		})
+	}
+}
+
+func TestWithRequestHeader_ValueTrimmed(t *testing.T) {
+	t.Parallel()
+
+	opts := newClientOptions()
+	WithRequestHeader("X-Custom", "  value with spaces  ")(opts)
+
+	if opts.requestHeaders["X-Custom"] != "value with spaces" {
+		t.Errorf("expected trimmed value, got %q", opts.requestHeaders["X-Custom"])
 	}
 }

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,6 +29,9 @@ const (
 	maxIdleConnTimeout     = 5 * time.Minute
 	defaultMaxRedirects    = 10
 	maxMaxRedirects        = 20
+	defaultAuthScheme      = "Bearer"
+	defaultAlertsEndpoint  = "alerts"
+	defaultPingEndpoint    = "ping"
 )
 
 // Option is a functional option for configuring a Client.
@@ -51,6 +55,9 @@ type Options struct {
 	idleConnTimeout   time.Duration
 	disableKeepAlive  bool
 	maxRedirects      int
+	tlsConfig         *tls.Config
+	alertsEndpoint    string
+	pingEndpoint      string
 }
 
 func newClientOptions() *Options {
@@ -71,11 +78,17 @@ func newClientOptions() *Options {
 		idleConnTimeout:  defaultIdleConnTimeout,
 		disableKeepAlive: false,
 		maxRedirects:     defaultMaxRedirects,
+		authScheme:       defaultAuthScheme,
+		alertsEndpoint:   defaultAlertsEndpoint,
+		pingEndpoint:     defaultPingEndpoint,
 	}
 }
 
 // WithRetryCount sets the number of retry attempts for failed requests.
-// Negative values are ignored. Maximum allowed is 100.
+// Maximum allowed is 100. Default is 3.
+//
+// Note: Invalid values (negative) are silently ignored and the default is retained.
+// Use Options.Validate() after Connect() to verify configuration.
 func WithRetryCount(count int) Option {
 	return func(o *Options) {
 		if count >= 0 {
@@ -85,7 +98,9 @@ func WithRetryCount(count int) Option {
 }
 
 // WithRetryWaitTime sets the initial wait time between retries.
-// Values less than 100ms are ignored. Maximum allowed is 1 minute.
+// Minimum is 100ms, maximum is 1 minute. Default is 500ms.
+//
+// Note: Values outside the valid range are silently ignored and the default is retained.
 func WithRetryWaitTime(waitTime time.Duration) Option {
 	return func(o *Options) {
 		if waitTime >= 100*time.Millisecond {
@@ -95,7 +110,10 @@ func WithRetryWaitTime(waitTime time.Duration) Option {
 }
 
 // WithRetryMaxWaitTime sets the maximum wait time between retries.
-// Values less than 100ms are ignored. Must be >= retryWaitTime. Maximum allowed is 5 minutes.
+// Minimum is 100ms, maximum is 5 minutes. Default is 3 seconds.
+// Must be >= retryWaitTime (validated at Connect time).
+//
+// Note: Values outside the valid range are silently ignored and the default is retained.
 func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 	return func(o *Options) {
 		if maxWaitTime >= 100*time.Millisecond {
@@ -105,7 +123,13 @@ func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 }
 
 // WithRequestLogger sets the logger for HTTP request logging.
-// Nil values are ignored.
+// Default is NoopLogger (discards all logs).
+//
+// Security note: The logger may receive sensitive data in request/response bodies.
+// Ensure your logger implementation sanitizes or redacts credentials, tokens,
+// and other sensitive information before persisting logs.
+//
+// Note: Nil values are silently ignored and the default is retained.
 func WithRequestLogger(logger RequestLogger) Option {
 	return func(o *Options) {
 		if logger != nil {
@@ -115,7 +139,10 @@ func WithRequestLogger(logger RequestLogger) Option {
 }
 
 // WithRetryPolicy sets a custom retry policy function.
-// Nil values are ignored.
+// Default is DefaultRetryPolicy which retries on 429, 5xx, and connection errors
+// (excluding context cancellation, deadline exceeded, and DNS errors).
+//
+// Note: Nil values are silently ignored and the default is retained.
 func WithRetryPolicy(policy func(*resty.Response, error) bool) Option {
 	return func(o *Options) {
 		if policy != nil {
@@ -125,10 +152,14 @@ func WithRetryPolicy(policy func(*resty.Response, error) bool) Option {
 }
 
 // WithRequestHeader adds a custom header to all requests.
-// Empty header names and attempts to override Content-Type or Accept are ignored.
+// Both header name and value are trimmed of leading/trailing whitespace.
+//
+// Note: Empty header names and attempts to override protected headers
+// (Content-Type, Accept) are silently ignored.
 func WithRequestHeader(header, value string) Option {
 	return func(o *Options) {
 		header = strings.TrimSpace(header)
+		value = strings.TrimSpace(value)
 
 		if header == "" || strings.EqualFold(header, "Content-Type") || strings.EqualFold(header, "Accept") {
 			return
@@ -164,8 +195,9 @@ func WithAuthToken(token string) Option {
 }
 
 // WithTimeout sets the overall request timeout.
-// Values less than 1 second or greater than 5 minutes are ignored.
-// Default is 30 seconds.
+// Minimum is 1 second, maximum is 5 minutes. Default is 30 seconds.
+//
+// Note: Values outside the valid range are silently ignored and the default is retained.
 func WithTimeout(timeout time.Duration) Option {
 	return func(o *Options) {
 		if timeout >= minTimeout && timeout <= maxTimeout {
@@ -175,8 +207,9 @@ func WithTimeout(timeout time.Duration) Option {
 }
 
 // WithUserAgent sets the User-Agent header for all requests.
-// Empty values are ignored.
 // Default is "slack-manager-go-client/1.0".
+//
+// Note: Empty values are silently ignored and the default is retained.
 func WithUserAgent(userAgent string) Option {
 	return func(o *Options) {
 		if userAgent != "" {
@@ -186,8 +219,9 @@ func WithUserAgent(userAgent string) Option {
 }
 
 // WithMaxIdleConns sets the maximum number of idle connections across all hosts.
-// Values less than 1 are ignored.
-// Default is 100.
+// Minimum is 1. Default is 100.
+//
+// Note: Values less than 1 are silently ignored and the default is retained.
 func WithMaxIdleConns(n int) Option {
 	return func(o *Options) {
 		if n >= 1 {
@@ -197,8 +231,9 @@ func WithMaxIdleConns(n int) Option {
 }
 
 // WithMaxConnsPerHost sets the maximum number of connections per host.
-// Values less than 1 or greater than 100 are ignored.
-// Default is 10.
+// Minimum is 1, maximum is 100. Default is 10.
+//
+// Note: Values outside the valid range are silently ignored and the default is retained.
 func WithMaxConnsPerHost(n int) Option {
 	return func(o *Options) {
 		if n >= 1 && n <= maxMaxConnsPerHost {
@@ -208,8 +243,9 @@ func WithMaxConnsPerHost(n int) Option {
 }
 
 // WithIdleConnTimeout sets how long idle connections remain in the pool.
-// Values less than 1 second or greater than 5 minutes are ignored.
-// Default is 90 seconds.
+// Minimum is 1 second, maximum is 5 minutes. Default is 90 seconds.
+//
+// Note: Values outside the valid range are silently ignored and the default is retained.
 func WithIdleConnTimeout(timeout time.Duration) Option {
 	return func(o *Options) {
 		if timeout >= minIdleConnTimeout && timeout <= maxIdleConnTimeout {
@@ -228,12 +264,52 @@ func WithDisableKeepAlive(disable bool) Option {
 }
 
 // WithMaxRedirects sets the maximum number of redirects to follow.
-// Use 0 to disable redirects. Values greater than 20 are ignored.
-// Default is 10.
+// Use 0 to disable redirects. Maximum is 20. Default is 10.
+//
+// Note: Negative values or values > 20 are silently ignored and the default is retained.
 func WithMaxRedirects(n int) Option {
 	return func(o *Options) {
 		if n >= 0 && n <= maxMaxRedirects {
 			o.maxRedirects = n
+		}
+	}
+}
+
+// WithTLSConfig sets custom TLS configuration for HTTPS connections.
+// Use this for custom CA certificates, mutual TLS (mTLS), or TLS version control.
+// Default is nil (uses Go's default TLS configuration).
+//
+// Note: Nil values are silently ignored.
+func WithTLSConfig(config *tls.Config) Option {
+	return func(o *Options) {
+		if config != nil {
+			o.tlsConfig = config
+		}
+	}
+}
+
+// WithAlertsEndpoint sets the API endpoint path for sending alerts.
+// Default is "alerts".
+//
+// Note: Empty values are silently ignored and the default is retained.
+func WithAlertsEndpoint(endpoint string) Option {
+	return func(o *Options) {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint != "" {
+			o.alertsEndpoint = endpoint
+		}
+	}
+}
+
+// WithPingEndpoint sets the API endpoint path for health checks.
+// Default is "ping".
+//
+// Note: Empty values are silently ignored and the default is retained.
+func WithPingEndpoint(endpoint string) Option {
+	return func(o *Options) {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint != "" {
+			o.pingEndpoint = endpoint
 		}
 	}
 }
@@ -318,6 +394,14 @@ func (o *Options) Validate() error {
 
 	if o.maxRedirects > maxMaxRedirects {
 		return fmt.Errorf("maxRedirects must not exceed %d", maxMaxRedirects)
+	}
+
+	if o.alertsEndpoint == "" {
+		return errors.New("alertsEndpoint must not be empty")
+	}
+
+	if o.pingEndpoint == "" {
+		return errors.New("pingEndpoint must not be empty")
 	}
 
 	return nil

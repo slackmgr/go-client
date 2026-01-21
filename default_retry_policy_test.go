@@ -157,10 +157,15 @@ func createRestyResponse(t *testing.T, statusCode int) *resty.Response {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(statusCode)
 	}))
-	defer server.Close()
+	// Close server after getting the response - don't use defer here
+	// as the response body is already buffered by resty
 
 	client := resty.New()
 	resp, err := client.R().Get(server.URL)
+
+	// Close the server after the request completes
+	server.Close()
+
 	if err != nil {
 		t.Fatalf("failed to create response: %v", err)
 	}
