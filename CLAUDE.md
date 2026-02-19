@@ -6,10 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Go HTTP client library for the Slack Manager API. Wraps [resty](https://github.com/go-resty/resty) with domain-specific functionality for sending alerts. Single package (`client`) with functional options pattern for configuration.
 
-## Git Conventions
-
-- Do not use the `-C` flag when running git commands directly in the repo directory, as it is not needed.
-
 ## Build Commands
 
 ```bash
@@ -30,14 +26,6 @@ go test -run TestName ./...
 ## Keeping README.md in Sync
 
 **After every code change, check whether `README.md` needs updating.** The README is the public-facing documentation and must always reflect the actual code.
-
-Changes that require a README update include (but are not limited to):
-
-- Adding, removing, or renaming `With*` option functions
-- Changing default values
-- Adding or removing public types, constants, or methods
-- Changes to the database schema or table structure
-- Changes to build commands or development setup
 
 ## Tagging and Releases
 

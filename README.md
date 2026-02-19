@@ -95,20 +95,6 @@ type RequestLogger interface {
 
 > **Note:** The logger may receive request and response bodies. Ensure your implementation redacts credentials and tokens before persisting logs.
 
-## Build Commands
-
-```bash
-make test       # Security scan, formatting check, race-detection tests, and vet
-make lint       # Run golangci-lint
-make lint-fix   # Run golangci-lint with auto-fix
-```
-
-Run a single test:
-
-```bash
-go test -run TestName ./...
-```
-
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
