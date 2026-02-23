@@ -47,6 +47,28 @@ if err := c.Send(ctx, alert); err != nil {
 }
 ```
 
+Use `SendWithResponse` when you need HTTP response metadata (status code, headers, duration):
+
+```go
+meta, err := c.SendWithResponse(ctx, alert)
+if err != nil {
+    if meta != nil {
+        // HTTP response was received but indicated an error
+        log.Printf("request failed: status=%d duration=%v", meta.StatusCode, meta.Duration)
+    }
+    log.Fatal(err)
+}
+log.Printf("sent: status=%d duration=%v", meta.StatusCode, meta.Duration)
+```
+
+`*ResponseMetadata` is non-nil whenever an HTTP response was received, even on non-2xx status codes. It is `nil` only when a network-level error prevents any response from arriving. This lets callers distinguish transport failures from server-reported errors.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `StatusCode` | `int` | HTTP response status code (e.g. `200`, `429`) |
+| `Duration` | `time.Duration` | Round-trip time for the request |
+| `Headers` | `map[string]string` | Response headers; multi-value headers joined with `", "` |
+
 `Connect` validates configuration, initializes the connection pool, and pings the API. It is safe for concurrent use and will only initialize once — if it fails, subsequent calls return the same error. Call `Close` when finished to release idle connections.
 
 ## Configuration

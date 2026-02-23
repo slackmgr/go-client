@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,13 @@ type alertsList struct {
 // apiErrorResponse represents the standard error response from the API.
 type apiErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// ResponseMetadata contains metadata from the HTTP response returned by [Client.SendWithResponse].
+type ResponseMetadata struct {
+	Duration   time.Duration
+	StatusCode int
+	Headers    map[string]string
 }
 
 // New creates a new [Client] configured with the given base URL and options.
@@ -111,21 +119,31 @@ func (c *Client) Connect(ctx context.Context) error {
 // Send posts one or more alerts to the API. [Client.Connect] must be called
 // first. Returns an error if the alerts slice is empty or any element is nil.
 func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
+	_, err := c.SendWithResponse(ctx, alerts...)
+	return err
+}
+
+// SendWithResponse posts one or more alerts to the API and returns HTTP response metadata.
+// [Client.Connect] must be called first. Returns an error if the alerts slice is empty or
+// any element is nil. The returned *ResponseMetadata is non-nil whenever an HTTP response
+// was received (even on non-2xx); it is nil only when a network-level error prevents any
+// response from arriving.
+func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (*ResponseMetadata, error) {
 	if c == nil {
-		return errors.New("alert client is nil")
+		return nil, errors.New("alert client is nil")
 	}
 
 	if c.client == nil {
-		return errors.New("client not connected - call Connect() first")
+		return nil, errors.New("client not connected - call Connect() first")
 	}
 
 	if len(alerts) == 0 {
-		return errors.New("alerts list cannot be empty")
+		return nil, errors.New("alerts list cannot be empty")
 	}
 
 	for i, alert := range alerts {
 		if alert == nil {
-			return fmt.Errorf("alert at index %d is nil", i)
+			return nil, fmt.Errorf("alert at index %d is nil", i)
 		}
 	}
 
@@ -135,10 +153,10 @@ func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
 
 	body, err := json.Marshal(alertsInput)
 	if err != nil {
-		return fmt.Errorf("failed to marshal alerts list: %w", err)
+		return nil, fmt.Errorf("failed to marshal alerts list: %w", err)
 	}
 
-	return c.post(ctx, c.options.alertsEndpoint, body)
+	return c.postWithResponse(ctx, c.options.alertsEndpoint, body)
 }
 
 // Close releases idle connections held by the client. After Close is called
@@ -190,19 +208,34 @@ func (c *Client) get(ctx context.Context, path string) error {
 	return nil
 }
 
-func (c *Client) post(ctx context.Context, path string, body []byte) error {
+func (c *Client) postWithResponse(ctx context.Context, path string, body []byte) (*ResponseMetadata, error) {
 	request := c.client.R().SetContext(ctx).SetBody(body)
 
 	response, err := request.Post(path)
 	if err != nil {
-		return fmt.Errorf("POST %s failed: %w", path, err)
+		return nil, fmt.Errorf("POST %s failed: %w", path, err)
+	}
+
+	meta := &ResponseMetadata{
+		Duration:   response.Time(),
+		StatusCode: response.StatusCode(),
+		Headers:    flattenHeaders(response.Header()),
 	}
 
 	if !response.IsSuccess() {
-		return fmt.Errorf("POST %s failed with status code %d: %s", sanitizeURL(response.Request.URL), response.StatusCode(), getBodyErrorMessage(response))
+		return meta, fmt.Errorf("POST %s failed with status code %d: %s", sanitizeURL(response.Request.URL), response.StatusCode(), getBodyErrorMessage(response))
 	}
 
-	return nil
+	return meta, nil
+}
+
+func flattenHeaders(h http.Header) map[string]string {
+	headers := make(map[string]string, len(h))
+	for key, values := range h {
+		headers[key] = strings.Join(values, ", ")
+	}
+
+	return headers
 }
 
 func getBodyErrorMessage(response *resty.Response) string {

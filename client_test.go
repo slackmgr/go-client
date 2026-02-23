@@ -954,6 +954,199 @@ func TestParseRetryAfterHeader(t *testing.T) {
 	})
 }
 
+func TestSendWithResponse_NilClient(t *testing.T) {
+	t.Parallel()
+
+	var c *Client
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{})
+
+	if err == nil {
+		t.Fatal("expected error for nil client")
+	}
+
+	if err.Error() != "alert client is nil" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if meta != nil {
+		t.Error("expected nil metadata for nil client")
+	}
+}
+
+func TestSendWithResponse_NotConnected(t *testing.T) {
+	t.Parallel()
+
+	c := New("http://example.com")
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{})
+
+	if err == nil {
+		t.Fatal("expected error for not connected client")
+	}
+
+	if err.Error() != "client not connected - call Connect() first" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if meta != nil {
+		t.Error("expected nil metadata for not connected client")
+	}
+}
+
+func TestSendWithResponse_EmptyAlerts(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_ = c.Connect(context.Background())
+
+	meta, err := c.SendWithResponse(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error for empty alerts")
+	}
+
+	if err.Error() != "alerts list cannot be empty" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if meta != nil {
+		t.Error("expected nil metadata for empty alerts")
+	}
+}
+
+func TestSendWithResponse_NilAlert(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_ = c.Connect(context.Background())
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{}, nil)
+
+	if err == nil {
+		t.Fatal("expected error for nil alert")
+	}
+
+	if err.Error() != "alert at index 1 is nil" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if meta != nil {
+		t.Error("expected nil metadata for nil alert")
+	}
+}
+
+func TestSendWithResponse_Success(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-Request-ID", "abc123")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := New(server.URL)
+	_ = c.Connect(context.Background())
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{Header: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if meta == nil {
+		t.Fatal("expected non-nil metadata on success")
+	}
+
+	if meta.StatusCode != http.StatusOK {
+		t.Errorf("expected StatusCode=200, got %d", meta.StatusCode)
+	}
+
+	if meta.Duration <= 0 {
+		t.Errorf("expected Duration > 0, got %v", meta.Duration)
+	}
+
+	if meta.Headers == nil {
+		t.Fatal("expected non-nil Headers map")
+	}
+
+	if meta.Headers["X-Request-Id"] != "abc123" {
+		t.Errorf("expected X-Request-Id=abc123, got %q", meta.Headers["X-Request-Id"])
+	}
+}
+
+func TestSendWithResponse_HTTPError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+	}))
+	defer server.Close()
+
+	c := New(server.URL, WithRetryCount(0))
+	_ = c.Connect(context.Background())
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{Header: "test"})
+
+	if err == nil {
+		t.Fatal("expected error for HTTP 400")
+	}
+
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("expected error to contain '400', got: %v", err)
+	}
+
+	if meta == nil {
+		t.Fatal("expected non-nil metadata even on HTTP error")
+	}
+
+	if meta.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected StatusCode=400, got %d", meta.StatusCode)
+	}
+}
+
+func TestSendWithResponse_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	c := New(server.URL, WithRetryCount(0))
+	_ = c.Connect(context.Background())
+
+	// Close server to trigger a network-level error
+	server.Close()
+
+	meta, err := c.SendWithResponse(context.Background(), &types.Alert{Header: "test"})
+
+	if err == nil {
+		t.Fatal("expected error for network failure")
+	}
+
+	if meta != nil {
+		t.Errorf("expected nil metadata on network error, got %+v", meta)
+	}
+}
+
 // makeRestyRequest is a helper that makes a resty request and returns the response.
 func makeRestyRequest(t *testing.T, url string) *resty.Response {
 	t.Helper()
