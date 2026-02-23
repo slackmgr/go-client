@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-23
+
+### Added
+
+- `SendWithResponse` method returning `*ResponseMetadata` (StatusCode, Duration, Headers) alongside the error
+- `ResponseMetadata` type for inspecting HTTP response details such as status code, round-trip duration, and response headers
+
+### Changed
+
+- `Send` now delegates to `SendWithResponse`, removing duplicated validation and marshalling logic
+
 ## [0.2.1] - 2026-02-23
 
 ### Fixed
@@ -86,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WithTimeout`, `WithUserAgent`, `WithRequestHeader` options
 - `WithRequestLogger`, `WithRetryPolicy` options
 
-[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/slackmgr/go-client/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/slackmgr/go-client/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/slackmgr/go-client/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/slackmgr/go-client/compare/v0.1.0...v0.1.1
