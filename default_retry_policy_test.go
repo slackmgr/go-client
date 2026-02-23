@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 
 	"github.com/go-resty/resty/v2"
@@ -42,6 +43,32 @@ func TestDefaultRetryPolicy_DNSError(t *testing.T) {
 
 	if result {
 		t.Error("expected false for DNS error")
+	}
+}
+
+func TestDefaultRetryPolicy_PermanentConnErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  syscall.Errno
+	}{
+		{"connection refused", syscall.ECONNREFUSED},
+		{"network unreachable", syscall.ENETUNREACH},
+		{"host unreachable", syscall.EHOSTUNREACH},
+		{"permission denied", syscall.EACCES},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opErr := &net.OpError{Op: "dial", Net: "tcp", Err: tt.err}
+
+			if DefaultRetryPolicy(nil, opErr) {
+				t.Errorf("expected false for %s", tt.name)
+			}
+		})
 	}
 }
 
