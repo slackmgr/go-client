@@ -159,6 +159,20 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 	return c.postWithResponse(ctx, c.options.alertsEndpoint, body)
 }
 
+// SendAlert posts a single alert to the API. It is equivalent to [Client.Send] with one alert.
+//
+// Deprecated: SendAlert exists for compatibility with the legacy client library. Use [Client.Send] instead.
+func (c *Client) SendAlert(ctx context.Context, alert *types.Alert) error {
+	return c.Send(ctx, alert)
+}
+
+// SendAlerts posts a list of alerts to the API. It is equivalent to calling [Client.Send] with the same alerts.
+//
+// Deprecated: SendAlerts exists for compatibility with the legacy client library. Use [Client.Send] instead.
+func (c *Client) SendAlerts(ctx context.Context, alerts []*types.Alert) error {
+	return c.Send(ctx, alerts...)
+}
+
 // Close releases idle connections held by the client. After Close is called
 // the client should not be reused.
 func (c *Client) Close() {

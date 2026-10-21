@@ -38,15 +38,13 @@ func DefaultRetryPolicy(r *resty.Response, err error) bool {
 		}
 
 		// Don't retry on DNS resolution errors
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) {
+		if _, ok := errors.AsType[*net.DNSError](err); ok {
 			return false
 		}
 
 		// Don't retry on permanent connection failures — these are immediate,
 		// deterministic rejections that will not resolve on a subsequent attempt.
-		var opErr *net.OpError
-		if errors.As(err, &opErr) {
+		if opErr, ok := errors.AsType[*net.OpError](err); ok {
 			for _, permErr := range permanentConnErrors {
 				if errors.Is(opErr.Err, permErr) {
 					return false

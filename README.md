@@ -13,7 +13,7 @@ A Go HTTP client for the [Slack Manager](https://github.com/slackmgr/core) API. 
 go get github.com/slackmgr/go-client
 ```
 
-Requires Go 1.25+.
+Requires Go 1.26+.
 
 ## Usage
 
@@ -70,6 +70,19 @@ log.Printf("sent: status=%d duration=%v", meta.StatusCode, meta.Duration)
 | `Headers` | `map[string]string` | Response headers; multi-value headers joined with `", "` |
 
 `Connect` validates configuration, initializes the connection pool, and pings the API. It is safe for concurrent use and will only initialize once — if it fails, subsequent calls return the same error. Call `Close` when finished to release idle connections.
+
+## Migrating from the legacy client library
+
+`SendAlert(ctx, alert)` and `SendAlerts(ctx, alerts)` are available as deprecated wrappers around `Send`, matching the method names of the legacy client library. Alert constructors such as `types.NewErrorAlert()` work the same as in the legacy library.
+
+Client creation differs and must be updated:
+
+| Legacy | New |
+|--------|-----|
+| `client, err := slacklib.NewAlertClient().Connect(ctx, baseURL, logger, opts...)` | `c := client.New(baseURL, opts...)` followed by `err := c.Connect(ctx)` |
+| `slacklib.RetryCount(n)`, `RetryWaitTime(d)`, `RetryMaxWaitTime(d)` | `client.WithRetryCount(n)`, `WithRetryWaitTime(d)`, `WithRetryMaxWaitTime(d)`. The default retry count is 3 (legacy: 8) |
+| `logger` argument to `Connect` (`Debugf`, `Infof`, `Errorf`) | `client.WithRequestLogger(logger)` (optional; `Debugf`, `Warnf`, `Errorf`) |
+| `GetMappings(ctx)` | Not available |
 
 ## Configuration
 

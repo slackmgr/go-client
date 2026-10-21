@@ -1159,3 +1159,67 @@ func makeRestyRequest(t *testing.T, url string) *resty.Response {
 
 	return resp
 }
+
+func TestSendAlert_DelegatesToSend(t *testing.T) {
+	t.Parallel()
+
+	var capturedPath string
+	var capturedBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	client := New(server.URL)
+	_ = client.Connect(context.Background())
+
+	err := client.SendAlert(context.Background(), &types.Alert{Header: "Test Alert"})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if capturedPath != "/alerts" {
+		t.Errorf("expected path=/alerts, got %s", capturedPath)
+	}
+
+	if !strings.Contains(string(capturedBody), `"alerts":[{`) || !strings.Contains(string(capturedBody), "Test Alert") {
+		t.Errorf("unexpected body: %s", capturedBody)
+	}
+
+	err = client.SendAlert(context.Background(), nil)
+	if err == nil || err.Error() != "alert at index 0 is nil" {
+		t.Errorf("unexpected error for nil alert: %v", err)
+	}
+}
+
+func TestSendAlerts_DelegatesToSend(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	client := New(server.URL)
+	_ = client.Connect(context.Background())
+
+	err := client.SendAlerts(context.Background(), []*types.Alert{{Header: "First"}, {Header: "Second"}})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(string(capturedBody), "First") || !strings.Contains(string(capturedBody), "Second") {
+		t.Errorf("unexpected body: %s", capturedBody)
+	}
+
+	err = client.SendAlerts(context.Background(), nil)
+	if err == nil || err.Error() != "alerts list cannot be empty" {
+		t.Errorf("unexpected error for empty alerts: %v", err)
+	}
+}

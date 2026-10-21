@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Deprecated `Client.SendAlert` and `Client.SendAlerts` methods, wrapping `Client.Send`, for compatibility with the legacy client library
+- README section on migrating from the legacy client library
+
+### Changed
+
+- Minimum Go version is now 1.26
+- Bump `github.com/slackmgr/types` dependency to v0.7.0
+- Use `errors.AsType` in `DefaultRetryPolicy` (no behaviour change)
+- Disable the `exhaustruct_v5` linter (renamed in golangci-lint 2.15), matching the existing `exhaustruct` exclusion
+
 ## [0.2.8] - 2026-05-11
 
 ### Changed
