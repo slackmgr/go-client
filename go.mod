@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/go-resty/resty/v2 v2.17.2
-	github.com/slackmgr/types v0.7.0
+	github.com/slackmgr/types v0.7.1
 )
 
 require (
