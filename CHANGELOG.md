@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Added
 
 - Deprecated `Client.SendAlert` and `Client.SendAlerts` methods, wrapping `Client.Send`, for compatibility with the legacy client library
@@ -148,7 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WithTimeout`, `WithUserAgent`, `WithRequestHeader` options
 - `WithRequestLogger`, `WithRetryPolicy` options
 
-[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/slackmgr/go-client/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/slackmgr/go-client/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/slackmgr/go-client/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/slackmgr/go-client/compare/v0.2.5...v0.2.6
