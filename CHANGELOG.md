@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Minimum Go version is now 1.26
 - Update GitHub Actions to latest versions (`actions/checkout` v7.0.1, `actions/setup-go` v7.0.0, `github/codeql-action` v4.39.0, `golangci/golangci-lint-action` v9.3.0)
-- CI gosec jobs now use the Go version from `go.mod` instead of latest stable
+- All CI and code scanning jobs now use the Go version from `go.mod` with `check-latest: true`, so gosec and both govulncheck runs use the latest Go 1.26 patch
+- `go.mod` declares `go 1.26` (was `1.26.0`), so CI resolves the latest 1.26 patch instead of exactly 1.26.0
 - Bump `github.com/slackmgr/types` dependency to v0.7.0
 - Use `errors.AsType` in `DefaultRetryPolicy` (no behaviour change)
 - Disable the `exhaustruct_v5` linter (renamed in golangci-lint 2.15), matching the existing `exhaustruct` exclusion

@@ -40,6 +40,7 @@ jobs:
       uses: actions/setup-go@v7.0.0
       with:
         go-version-file: 'go.mod'
+        check-latest: true
         cache: true
         cache-dependency-path: 'go.sum'
 
@@ -66,9 +67,8 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v7.0.0
       with:
-        # Latest stable Go, so govulncheck reports standard library vulnerabilities in the
-        # current release rather than in the exact (older) patch version in go.mod.
-        go-version: 'stable'
+        go-version-file: 'go.mod'
+        check-latest: true
         cache: true
         cache-dependency-path: 'go.sum'
 
