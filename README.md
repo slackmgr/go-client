@@ -109,6 +109,7 @@ All options are provided via `With*` constructor functions.
 | `WithTLSConfig(*tls.Config)` | `nil` | Custom TLS configuration for mTLS, custom CAs, etc. |
 | `WithAlertsEndpoint(string)` | `"alerts"` | API endpoint path for sending alerts |
 | `WithPingEndpoint(string)` | `"ping"` | API endpoint path for health checks |
+| `WithAlertClient(string)` | `""` | Client identifier (`Alert.Client`, e.g. the name of your monitoring tool) set on every sent alert that has none. The caller's alerts are not modified. Max 100 characters, checked by `Connect`. When empty, Slack Manager groups alerts by `Username` |
 
 ### Retry behaviour
 

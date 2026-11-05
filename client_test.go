@@ -1223,3 +1223,74 @@ func TestSendAlerts_DelegatesToSend(t *testing.T) {
 		t.Errorf("unexpected error for empty alerts: %v", err)
 	}
 }
+
+func TestSend_WithAlertClient(t *testing.T) {
+	t.Parallel()
+
+	var captured alertsList
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/alerts" {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &captured)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, WithAlertClient("my-tool"))
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("unexpected connect error: %v", err)
+	}
+
+	withoutClient := &types.Alert{Header: "a"}
+	blankClient := &types.Alert{Header: "b", Client: "  "}
+	withClient := &types.Alert{Header: "c", Client: "prometheus"}
+
+	if err := client.Send(context.Background(), withoutClient, blankClient, withClient); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(captured.Alerts) != 3 {
+		t.Fatalf("expected 3 alerts, got %d", len(captured.Alerts))
+	}
+
+	for i, want := range []string{"my-tool", "my-tool", "prometheus"} {
+		if got := captured.Alerts[i].Client; got != want {
+			t.Errorf("alert %d: expected client=%q, got %q", i, want, got)
+		}
+	}
+
+	if withoutClient.Client != "" || blankClient.Client != "  " || withClient.Client != "prometheus" {
+		t.Error("the caller's alerts must not be modified")
+	}
+}
+
+func TestSend_WithoutAlertClient(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/alerts" {
+			capturedBody, _ = io.ReadAll(r.Body)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(server.URL)
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("unexpected connect error: %v", err)
+	}
+
+	if err := client.Send(context.Background(), &types.Alert{Header: "a"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(string(capturedBody), `"client"`) {
+		t.Errorf("expected no client in body, got: %s", capturedBody)
+	}
+}

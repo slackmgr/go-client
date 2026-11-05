@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `WithAlertClient(string)`: sets `Alert.Client` (the monitoring tool or integration, used by Slack Manager for grouping, filtering and reporting) on every sent alert that has no client. The caller's alerts are never modified. Values longer than `types.MaxClientLength` (100) characters are rejected by `Connect`
+- Requires `github.com/slackmgr/types` with `Alert.Client`
+
 ## [0.3.3] - 2026-11-03
 
 ### Changed

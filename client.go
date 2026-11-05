@@ -148,7 +148,7 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 	}
 
 	alertsInput := &alertsList{
-		Alerts: alerts,
+		Alerts: c.withAlertClient(alerts),
 	}
 
 	body, err := json.Marshal(alertsInput)
@@ -306,4 +306,27 @@ func parseRetryAfterHeader(_ *resty.Client, resp *resty.Response) (time.Duration
 	}
 
 	return 0, nil
+}
+
+// withAlertClient returns the alerts with the configured alert client (see [WithAlertClient]) set on those
+// without a client. Alerts that need it are shallow copies, so the caller's alerts are never modified.
+func (c *Client) withAlertClient(alerts []*types.Alert) []*types.Alert {
+	if c.options.alertClient == "" {
+		return alerts
+	}
+
+	result := make([]*types.Alert, len(alerts))
+
+	for i, alert := range alerts {
+		if strings.TrimSpace(alert.Client) != "" {
+			result[i] = alert
+			continue
+		}
+
+		cp := *alert
+		cp.Client = c.options.alertClient
+		result[i] = &cp
+	}
+
+	return result
 }

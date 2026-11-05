@@ -2,10 +2,12 @@ package client
 
 import (
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/slackmgr/types"
 )
 
 func TestNewClientOptions(t *testing.T) {
@@ -762,5 +764,50 @@ func TestWithRequestHeader_ValueTrimmed(t *testing.T) {
 
 	if opts.requestHeaders["X-Custom"] != "value with spaces" {
 		t.Errorf("expected trimmed value, got %q", opts.requestHeaders["X-Custom"])
+	}
+}
+
+func TestWithAlertClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"valid client", "my-batch-job", "my-batch-job"},
+		{"empty", "", ""},
+		{"whitespace trimmed", "  grafana  ", "grafana"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := newClientOptions()
+			WithAlertClient(tt.input)(opts)
+
+			if opts.alertClient != tt.expected {
+				t.Errorf("expected alertClient=%q, got %q", tt.expected, opts.alertClient)
+			}
+		})
+	}
+}
+
+func TestValidate_AlertClientLength(t *testing.T) {
+	t.Parallel()
+
+	opts := newClientOptions()
+	WithAlertClient(strings.Repeat("æ", types.MaxClientLength))(opts)
+
+	if err := opts.Validate(); err != nil {
+		t.Errorf("expected max length (in characters) to be valid, got: %v", err)
+	}
+
+	WithAlertClient(strings.Repeat("x", types.MaxClientLength+1))(opts)
+
+	err := opts.Validate()
+	if err == nil || !strings.Contains(err.Error(), "alertClient must not exceed") {
+		t.Errorf("expected alertClient length error, got: %v", err)
 	}
 }

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-resty/resty/v2"
+	"github.com/slackmgr/types"
 )
 
 const (
@@ -60,6 +62,7 @@ type Options struct {
 	tlsConfig         *tls.Config
 	alertsEndpoint    string
 	pingEndpoint      string
+	alertClient       string
 }
 
 func newClientOptions() *Options {
@@ -302,6 +305,17 @@ func WithPingEndpoint(endpoint string) Option {
 	}
 }
 
+// WithAlertClient sets the client identifier ([types.Alert.Client]) of every sent alert that has none, e.g. the
+// name of the monitoring tool or integration that uses this client. Alerts with a non-empty Client are sent
+// unchanged, and the caller's alerts are never modified. The value is trimmed; it must not exceed
+// [types.MaxClientLength] characters, which is checked when [Client.Connect] is called. The default is empty,
+// in which case the Slack Manager falls back to the alert's Username (see [types.Alert.EffectiveClient]).
+func WithAlertClient(client string) Option {
+	return func(o *Options) {
+		o.alertClient = strings.TrimSpace(client)
+	}
+}
+
 // Validate checks all options fields for validity and returns an error if any are invalid.
 func (o *Options) Validate() error {
 	if o.retryCount < 0 {
@@ -338,6 +352,10 @@ func (o *Options) Validate() error {
 
 	if o.retryPolicy == nil {
 		return errors.New("retryPolicy must not be nil")
+	}
+
+	if utf8.RuneCountInString(o.alertClient) > types.MaxClientLength {
+		return fmt.Errorf("alertClient must not exceed %d characters", types.MaxClientLength)
 	}
 
 	if o.basicAuthUsername != "" && o.authToken != "" {
