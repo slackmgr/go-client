@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
 ### Added
 - `WithAlertClient(string)`: sets `Alert.Client` (the monitoring tool or integration, used by Slack Manager for grouping, filtering and reporting) on every sent alert that has no client. The caller's alerts are never modified. Values longer than `types.MaxClientLength` (100) characters are rejected by `Connect`
 
@@ -174,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WithTimeout`, `WithUserAgent`, `WithRequestHeader` options
 - `WithRequestLogger`, `WithRetryPolicy` options
 
-[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/slackmgr/go-client/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/slackmgr/go-client/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/slackmgr/go-client/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/slackmgr/go-client/compare/v0.3.0...v0.3.1
