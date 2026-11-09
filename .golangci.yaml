@@ -32,6 +32,13 @@ linters:
   settings:
     asasalint:
       use-builtin-exclusions: true
+    govet:
+      settings:
+        printf:
+          funcs:
+            - (github.com/slackmgr/types.Logger).Debugf
+            - (github.com/slackmgr/types.Logger).Infof
+            - (github.com/slackmgr/types.Logger).Errorf
     ireturn:
       allow:
         - anon
