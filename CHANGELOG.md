@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `APIError`: typed error for non-2xx responses, with status code, message, `Retry-After` wait and number of attempts
+- `ErrRateLimited`: matches an `APIError` with status 429 via `errors.Is`
+- `WithSendTimeout(time.Duration)`: maximum total time of `Send`/`SendWithResponse`, including retries and waits, when the context has no deadline (default 2m, 0 disables). Previously, a send without a context deadline could block for several minutes
+- `WithRetryBackoff(initial, max time.Duration)`: backoff for retries of 5xx responses and connection errors, replacing `WithRetryWaitTime` and `WithRetryMaxWaitTime`
+- `WithRetryCondition(func(statusCode int, err error) bool)` and `DefaultRetryCondition`: retry condition without resty types, replacing `WithRetryPolicy` and `DefaultRetryPolicy`
+- `WithMaxRateLimitWait(time.Duration)`: longest wait because of the rate limit, i.e. a 429's `Retry-After` or client-side pacing (default 1m, 1s–10min)
+- Client-side rate limit pacing (`WithRateLimitPacing`, enabled by default): the client mirrors the API's per-channel token buckets from the `RateLimit-Policy` and `RateLimit-*` headers and waits before sending requests that would be rejected with 429. If the wait exceeds `WithMaxRateLimitWait` or the context deadline, it returns an `APIError` with `NotSent` set, without sending
+
+### Changed
+- The retry condition is only called for failed attempts (error or non-2xx response). Previously, as a resty retry condition, it was also called for successful responses
+- Retries are handled by the client instead of resty. Requests made directly on `RestyClient()` are no longer retried
+- The client stops retrying when the requested `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline
+
+- Clarified the docs of `WithRetryCount` and the retry options: backoff only applies to retries of 5xx responses and connection errors, 429 retries wait for `Retry-After`
+
+- Connection refused is now retried by `DefaultRetryCondition`, as it is what clients typically get while the API restarts or is redeployed
+- The default `User-Agent` is `slack-manager-go-client/<module version>` (from the build info, `dev` if unknown), instead of the fixed `slack-manager-go-client/1.0`
+
+### Deprecated
+- `WithRetryWaitTime` and `WithRetryMaxWaitTime`: use `WithRetryBackoff`
+- `WithRetryPolicy`: use `WithRetryCondition`
+- `DefaultRetryPolicy`: use `DefaultRetryCondition`
+
+### Fixed
+- `Retry-After` waits were capped by `WithRetryMaxWaitTime` (default 3s), so the client retried before the rate limit window opened and used up its retries on certain 429s
+- A `Retry-After` date in the past made the client wait the full max wait instead of retrying immediately
+
 ## [0.4.0] - 2026-11-05
 
 ### Added

@@ -27,11 +27,29 @@
 //
 // # Retry Behaviour
 //
-// [DefaultRetryPolicy] retries on HTTP 429 (rate limit) and 5xx server
-// errors, and on transient connection errors. It respects the Retry-After
-// response header for rate-limit backoff. Context cancellation, deadline
+// [DefaultRetryCondition] retries on HTTP 429 (rate limit) and 5xx server
+// errors, and on transient connection errors. Context cancellation, deadline
 // exceeded, and DNS resolution errors are never retried. Supply a custom
-// function via [WithRetryPolicy] to override this behaviour.
+// function via [WithRetryCondition] to override this behaviour.
+//
+// Before retrying a 429, the client waits exactly the time in the Retry-After
+// header (up to [WithMaxRateLimitWait]). Retries of 5xx responses and
+// connection errors use exponential backoff with jitter ([WithRetryBackoff]).
+// Retrying stops early when the wait exceeds [WithMaxRateLimitWait] or the
+// context deadline. Without a context deadline, a send is limited to
+// [WithSendTimeout] (default 2 minutes).
+//
+// # Rate Limit Pacing
+//
+// The client mirrors the API's per-channel token bucket rate limiter, learned
+// from the RateLimit-Policy and RateLimit-* response headers, and waits before
+// sending a request the API would reject with 429. See [WithRateLimitPacing].
+//
+// # Errors
+//
+// Non-2xx responses are returned as [*APIError]. Use [errors.Is] with
+// [ErrRateLimited] to detect rate limiting, and [APIError.RetryAfter] to
+// decide when to try again.
 //
 // # Authentication
 //

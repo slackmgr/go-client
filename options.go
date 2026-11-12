@@ -19,10 +19,17 @@ const (
 	minRetryMaxWaitTime = 100 * time.Millisecond
 	maxRetryMaxWaitTime = 5 * time.Minute
 
+	defaultSendTimeout = 2 * time.Minute
+	minSendTimeout     = 1 * time.Second
+	maxSendTimeout     = 1 * time.Hour
+
+	defaultMaxRateLimitWait = 1 * time.Minute
+	minMaxRateLimitWait     = 1 * time.Second
+	maxMaxRateLimitWait     = 10 * time.Minute
+
 	defaultTimeout         = 30 * time.Second
 	minTimeout             = 1 * time.Second
 	maxTimeout             = 5 * time.Minute
-	defaultUserAgent       = "slack-manager-go-client/1.0"
 	defaultMaxIdleConns    = 100
 	defaultMaxConnsPerHost = 10
 	maxMaxConnsPerHost     = 100
@@ -45,6 +52,9 @@ type Options struct {
 	retryCount        int
 	retryWaitTime     time.Duration
 	retryMaxWaitTime  time.Duration
+	maxRateLimitWait  time.Duration
+	sendTimeout       time.Duration
+	rateLimitPacing   bool
 	requestLogger     RequestLogger
 	retryPolicy       func(*resty.Response, error) bool
 	requestHeaders    map[string]string
@@ -70,14 +80,17 @@ func newClientOptions() *Options {
 		retryCount:       3,
 		retryWaitTime:    500 * time.Millisecond,
 		retryMaxWaitTime: 3 * time.Second,
+		maxRateLimitWait: defaultMaxRateLimitWait,
+		sendTimeout:      defaultSendTimeout,
+		rateLimitPacing:  true,
 		requestLogger:    &NoopLogger{},
-		retryPolicy:      DefaultRetryPolicy,
+		retryPolicy:      retryConditionPolicy(DefaultRetryCondition),
 		requestHeaders: map[string]string{
 			"Content-Type": "application/json",
 			"Accept":       "application/json",
 		},
 		timeout:          defaultTimeout,
-		userAgent:        defaultUserAgent,
+		userAgent:        defaultUserAgent(),
 		maxIdleConns:     defaultMaxIdleConns,
 		maxConnsPerHost:  defaultMaxConnsPerHost,
 		idleConnTimeout:  defaultIdleConnTimeout,
@@ -89,9 +102,16 @@ func newClientOptions() *Options {
 	}
 }
 
-// WithRetryCount sets the number of retry attempts for failed requests.
-// The default is 3. The maximum allowed value is 100. Negative values are
-// silently ignored and the default is retained.
+// WithRetryCount sets the maximum number of retries after the first attempt.
+// A failed attempt is retried when the retry condition ([WithRetryCondition])
+// says so; by default on 429, 5xx and transient connection errors. 0 disables
+// retries. The default is 3.
+//
+// Waits for client-side rate limit pacing ([WithRateLimitPacing]) happen
+// before sending and are not retries.
+//
+// Negative values are silently ignored. Values above 100 are rejected by
+// [Client.Connect].
 func WithRetryCount(count int) Option {
 	return func(o *Options) {
 		if count >= 0 {
@@ -100,26 +120,86 @@ func WithRetryCount(count int) Option {
 	}
 }
 
-// WithRetryWaitTime sets the initial wait time between retries. The default
-// is 500ms. Valid range is 100ms–1 minute. Values outside this range are
-// silently ignored and the default is retained.
+// WithRetryBackoff sets the backoff between retries of 5xx responses and
+// connection errors: the first retry waits initial, and the wait doubles with
+// each retry, with jitter, up to maxWait. It does not apply to 429 responses,
+// which the API always sends with a Retry-After header (see
+// [WithMaxRateLimitWait]). The default is 500ms initial and 3s max.
+//
+// initial must be 100ms–1 minute, and maxWait 100ms–5 minutes and at least
+// initial; this is validated by [Client.Connect].
+func WithRetryBackoff(initial, maxWait time.Duration) Option {
+	return func(o *Options) {
+		o.retryWaitTime = initial
+		o.retryMaxWaitTime = maxWait
+	}
+}
+
+// WithRetryWaitTime sets the initial backoff wait of [WithRetryBackoff].
+// Values below 100ms are silently ignored.
+//
+// Deprecated: Use [WithRetryBackoff], which sets the initial and max wait together.
 func WithRetryWaitTime(waitTime time.Duration) Option {
 	return func(o *Options) {
-		if waitTime >= 100*time.Millisecond {
+		if waitTime >= minRetryWaitTime {
 			o.retryWaitTime = waitTime
 		}
 	}
 }
 
-// WithRetryMaxWaitTime sets the maximum wait time between retries. The
-// default is 3 seconds. Valid range is 100ms–5 minutes. Must be greater
-// than or equal to [WithRetryWaitTime]; this constraint is validated when
-// [Client.Connect] is called. Values outside the range are silently ignored.
+// WithRetryMaxWaitTime sets the max backoff wait of [WithRetryBackoff].
+// Values below 100ms are silently ignored.
+//
+// Deprecated: Use [WithRetryBackoff], which sets the initial and max wait together.
 func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 	return func(o *Options) {
-		if maxWaitTime >= 100*time.Millisecond {
+		if maxWaitTime >= minRetryMaxWaitTime {
 			o.retryMaxWaitTime = maxWaitTime
 		}
+	}
+}
+
+// WithMaxRateLimitWait sets the longest the client waits because of the
+// API's rate limit, in two places:
+//
+//   - Before retrying a 429 response: the client waits exactly the time in
+//     its Retry-After header.
+//   - Before sending, when client-side pacing ([WithRateLimitPacing]) predicts
+//     a 429.
+//
+// If the wait would be longer than this, or past the context deadline, the
+// client returns an [*APIError] with status 429 right away, instead of a
+// request or retry that could not succeed. [APIError.RetryAfter] tells when
+// to try again, and [APIError.NotSent] whether the last request was sent.
+//
+// The default is 1 minute. Valid range is 1s–10 minutes; values outside it
+// are silently ignored. Retries of 429 responses count against
+// [WithRetryCount].
+func WithMaxRateLimitWait(maxWait time.Duration) Option {
+	return func(o *Options) {
+		if maxWait >= minMaxRateLimitWait && maxWait <= maxMaxRateLimitWait {
+			o.maxRateLimitWait = maxWait
+		}
+	}
+}
+
+// WithRateLimitPacing enables or disables client-side pacing of alerts against
+// the API's per-channel rate limit. It is enabled by default.
+//
+// The client learns the limit from the RateLimit-Policy and RateLimit-*
+// response headers and keeps a token bucket per target channel (or route
+// key), resynced from every response. Before sending, it waits until all
+// targets of the request have enough tokens, instead of sending a request
+// the API would reject with 429. If the wait exceeds [WithMaxRateLimitWait]
+// or the context deadline, the request is not sent and an [*APIError] with
+// status 429 and [APIError.NotSent] is returned.
+//
+// Only alerts sent through this client are counted; other senders to the
+// same channel are seen through the API's headers. So the client only
+// delays requests that would be rejected, and the API remains the authority.
+func WithRateLimitPacing(enabled bool) Option {
+	return func(o *Options) {
+		o.rateLimitPacing = enabled
 	}
 }
 
@@ -137,15 +217,43 @@ func WithRequestLogger(logger RequestLogger) Option {
 	}
 }
 
-// WithRetryPolicy sets a custom function that decides whether a failed
-// request should be retried. The default is [DefaultRetryPolicy], which
-// retries on 429, 5xx, and transient connection errors. Nil values are
-// silently ignored and the default is retained.
+// WithRetryCondition sets the function that decides whether a failed attempt
+// is retried, as long as retries remain ([WithRetryCount]). statusCode is the
+// HTTP status code of the response, or 0 if no response was received (err is
+// then non-nil). The default is [DefaultRetryCondition], which retries on 429,
+// 5xx and transient connection errors; call it from a custom condition to
+// extend the default behaviour.
+//
+// The condition only decides whether to retry. The wait is the Retry-After
+// header for 429 responses ([WithMaxRateLimitWait]), and backoff otherwise
+// ([WithRetryBackoff]).
+//
+// Nil values are silently ignored and the default is retained.
+func WithRetryCondition(condition func(statusCode int, err error) bool) Option {
+	return func(o *Options) {
+		if condition != nil {
+			o.retryPolicy = retryConditionPolicy(condition)
+		}
+	}
+}
+
+// WithRetryPolicy sets the retry condition as a function of the resty
+// response. The response may be nil, or have no raw response, when err is
+// non-nil. Nil values are silently ignored.
+//
+// Deprecated: Use [WithRetryCondition], which does not depend on resty types.
 func WithRetryPolicy(policy func(*resty.Response, error) bool) Option {
 	return func(o *Options) {
 		if policy != nil {
 			o.retryPolicy = policy
 		}
+	}
+}
+
+// retryConditionPolicy adapts a retry condition to the internal resty based retry policy.
+func retryConditionPolicy(condition func(statusCode int, err error) bool) func(*resty.Response, error) bool {
+	return func(r *resty.Response, err error) bool {
+		return condition(statusCode(r), err)
 	}
 }
 
@@ -193,9 +301,12 @@ func WithAuthToken(token string) Option {
 	}
 }
 
-// WithTimeout sets the per-request timeout. The default is 30 seconds.
-// Valid range is 1 second–5 minutes. Values outside this range are silently
-// ignored and the default is retained.
+// WithTimeout sets the timeout of a single HTTP request (one attempt). The
+// default is 30 seconds. Valid range is 1 second–5 minutes. Values outside
+// this range are silently ignored and the default is retained.
+//
+// The total time of a send, including retries and waits, is limited by the
+// context deadline or [WithSendTimeout].
 func WithTimeout(timeout time.Duration) Option {
 	return func(o *Options) {
 		if timeout >= minTimeout && timeout <= maxTimeout {
@@ -204,9 +315,30 @@ func WithTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithSendTimeout sets the maximum total time of [Client.Send] and
+// [Client.SendWithResponse], including retries, backoff and rate limit
+// waits, when the context has no deadline. A context deadline always takes
+// precedence. The default is 2 minutes. 0 disables the limit, so that a send
+// without a context deadline is only limited by the retry options.
+//
+// When a wait would pass the limit, the client returns the last error right
+// away instead of waiting (e.g. an [*APIError] with status 429 and
+// [APIError.RetryAfter] set).
+//
+// Valid values are 0 and 1 second–1 hour; others are silently ignored and the
+// default is retained.
+func WithSendTimeout(timeout time.Duration) Option {
+	return func(o *Options) {
+		if timeout == 0 || (timeout >= minSendTimeout && timeout <= maxSendTimeout) {
+			o.sendTimeout = timeout
+		}
+	}
+}
+
 // WithUserAgent sets the User-Agent header sent with every request. The
-// default is "slack-manager-go-client/1.0". Empty values are silently
-// ignored and the default is retained.
+// default is "slack-manager-go-client/<module version>", e.g.
+// "slack-manager-go-client/v0.5.0" ("dev" when the version is unknown). Empty
+// values are silently ignored and the default is retained.
 func WithUserAgent(userAgent string) Option {
 	return func(o *Options) {
 		if userAgent != "" {
@@ -327,23 +459,31 @@ func (o *Options) Validate() error {
 	}
 
 	if o.retryWaitTime < minRetryWaitTime {
-		return fmt.Errorf("retryWaitTime must be at least %v", minRetryWaitTime)
+		return fmt.Errorf("retry backoff initial wait (WithRetryBackoff) must be at least %v", minRetryWaitTime)
 	}
 
 	if o.retryWaitTime > maxRetryWaitTime {
-		return fmt.Errorf("retryWaitTime must not exceed %v", maxRetryWaitTime)
+		return fmt.Errorf("retry backoff initial wait (WithRetryBackoff) must not exceed %v", maxRetryWaitTime)
 	}
 
 	if o.retryMaxWaitTime < minRetryMaxWaitTime {
-		return fmt.Errorf("retryMaxWaitTime must be at least %v", minRetryMaxWaitTime)
+		return fmt.Errorf("retry backoff max wait (WithRetryBackoff) must be at least %v", minRetryMaxWaitTime)
 	}
 
 	if o.retryMaxWaitTime > maxRetryMaxWaitTime {
-		return fmt.Errorf("retryMaxWaitTime must not exceed %v", maxRetryMaxWaitTime)
+		return fmt.Errorf("retry backoff max wait (WithRetryBackoff) must not exceed %v", maxRetryMaxWaitTime)
 	}
 
 	if o.retryMaxWaitTime < o.retryWaitTime {
-		return fmt.Errorf("retryMaxWaitTime (%v) must be greater than or equal to retryWaitTime (%v)", o.retryMaxWaitTime, o.retryWaitTime)
+		return fmt.Errorf("retry backoff max wait (%v) must be greater than or equal to the initial wait (%v) (WithRetryBackoff)", o.retryMaxWaitTime, o.retryWaitTime)
+	}
+
+	if o.maxRateLimitWait < minMaxRateLimitWait {
+		return fmt.Errorf("max rate limit wait (WithMaxRateLimitWait) must be at least %v", minMaxRateLimitWait)
+	}
+
+	if o.maxRateLimitWait > maxMaxRateLimitWait {
+		return fmt.Errorf("max rate limit wait (WithMaxRateLimitWait) must not exceed %v", maxMaxRateLimitWait)
 	}
 
 	if o.requestLogger == nil {

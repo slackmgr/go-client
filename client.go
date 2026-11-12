@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ type Client struct {
 	once       sync.Once
 	connectErr error
 	transport  *http.Transport
+	pacer      *pacer
 }
 
 type alertsList struct {
@@ -53,10 +53,16 @@ func New(baseURL string, opts ...Option) *Client {
 		o(options)
 	}
 
-	return &Client{
+	c := &Client{
 		baseURL: baseURL,
 		options: options,
 	}
+
+	if options.rateLimitPacing {
+		c.pacer = newPacer(time.Now)
+	}
+
+	return c
 }
 
 // Connect initializes the HTTP client and validates connectivity by pinging
@@ -88,11 +94,6 @@ func (c *Client) Connect(ctx context.Context) error {
 			SetTimeout(c.options.timeout).
 			SetTransport(c.transport).
 			SetRedirectPolicy(resty.FlexibleRedirectPolicy(c.options.maxRedirects)).
-			SetRetryCount(c.options.retryCount).
-			SetRetryWaitTime(c.options.retryWaitTime).
-			SetRetryMaxWaitTime(c.options.retryMaxWaitTime).
-			AddRetryCondition(c.options.retryPolicy).
-			SetRetryAfter(parseRetryAfterHeader).
 			SetLogger(c.options.requestLogger).
 			SetHeader("User-Agent", c.options.userAgent)
 
@@ -126,8 +127,10 @@ func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
 // SendWithResponse posts one or more alerts to the API and returns HTTP response metadata.
 // [Client.Connect] must be called first. Returns an error if the alerts slice is empty or
 // any element is nil. The returned *ResponseMetadata is non-nil whenever an HTTP response
-// was received (even on non-2xx); it is nil only when a network-level error prevents any
-// response from arriving.
+// was received (even on non-2xx); it is nil when a network-level error prevents any
+// response from arriving, or when client-side rate limit pacing ([WithRateLimitPacing])
+// stopped the first attempt from being sent. After retries, it describes the last
+// response received.
 func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (*ResponseMetadata, error) {
 	if c == nil {
 		return nil, errors.New("alert client is nil")
@@ -151,12 +154,24 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 		Alerts: c.withAlertClient(alerts),
 	}
 
+	var targets map[string]int
+	if c.pacer != nil {
+		targets = pacingTargets(alertsInput.Alerts)
+	}
+
 	body, err := json.Marshal(alertsInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal alerts list: %w", err)
 	}
 
-	return c.postWithResponse(ctx, c.options.alertsEndpoint, body)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.options.sendTimeout > 0 {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, c.options.sendTimeout)
+		defer cancel()
+	}
+
+	return c.postWithResponse(ctx, c.options.alertsEndpoint, body, targets)
 }
 
 // SendAlert posts a single alert to the API. It is equivalent to [Client.Send] with one alert.
@@ -198,7 +213,9 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // RestyClient returns the underlying resty.Client for advanced configuration.
 // Returns nil if [Client.Connect] has not been called. Use with caution:
-// direct modifications may affect client behaviour.
+// direct modifications may affect client behaviour. Retries are handled by
+// [Client], not resty, so requests made directly on the resty client are not
+// retried.
 func (c *Client) RestyClient() *resty.Client {
 	return c.client
 }
@@ -208,39 +225,63 @@ func (c *Client) ping(ctx context.Context) error {
 }
 
 func (c *Client) get(ctx context.Context, path string) error {
-	request := c.client.R().SetContext(ctx)
-
-	response, err := request.Get(path)
+	response, attempts, err := c.execute(ctx, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return fmt.Errorf("GET %s failed: %w", path, err)
 	}
 
 	if !response.IsSuccess() {
-		return fmt.Errorf("GET %s failed with status code %d: %s", sanitizeURL(response.Request.URL), response.StatusCode(), getBodyErrorMessage(response))
+		return newAPIError(response, attempts)
 	}
 
 	return nil
 }
 
-func (c *Client) postWithResponse(ctx context.Context, path string, body []byte) (*ResponseMetadata, error) {
-	request := c.client.R().SetContext(ctx).SetBody(body)
+func (c *Client) postWithResponse(ctx context.Context, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
+	response, attempts, err := c.execute(ctx, http.MethodPost, path, body, targets)
 
-	response, err := request.Post(path)
+	if _, ok := errors.AsType[*APIError](err); ok {
+		return responseMetadata(response), err
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("POST %s failed: %w", path, err)
 	}
 
-	meta := &ResponseMetadata{
+	meta := responseMetadata(response)
+
+	if !response.IsSuccess() {
+		return meta, newAPIError(response, attempts)
+	}
+
+	return meta, nil
+}
+
+// responseMetadata returns the metadata of a response, or nil if there is none.
+func responseMetadata(response *resty.Response) *ResponseMetadata {
+	if response == nil || response.RawResponse == nil {
+		return nil
+	}
+
+	return &ResponseMetadata{
 		Duration:   response.Time(),
 		StatusCode: response.StatusCode(),
 		Headers:    flattenHeaders(response.Header()),
 	}
+}
 
-	if !response.IsSuccess() {
-		return meta, fmt.Errorf("POST %s failed with status code %d: %s", sanitizeURL(response.Request.URL), response.StatusCode(), getBodyErrorMessage(response))
+// newAPIError creates an [*APIError] from a non-2xx response.
+func newAPIError(response *resty.Response, attempts int) *APIError {
+	wait, _ := retryAfter(response, time.Now())
+
+	return &APIError{
+		Method:     response.Request.Method,
+		URL:        sanitizeURL(response.Request.URL),
+		StatusCode: response.StatusCode(),
+		Message:    getBodyErrorMessage(response),
+		RetryAfter: wait,
+		Attempts:   attempts,
 	}
-
-	return meta, nil
 }
 
 func flattenHeaders(h http.Header) map[string]string {
@@ -285,27 +326,6 @@ func sanitizeURL(rawURL string) string {
 	}
 
 	return result
-}
-
-// parseRetryAfterHeader extracts the Retry-After header value for rate limiting.
-// Returns the duration to wait before retrying if the header is present.
-func parseRetryAfterHeader(_ *resty.Client, resp *resty.Response) (time.Duration, error) {
-	retryAfter := resp.Header().Get("Retry-After")
-	if retryAfter == "" {
-		return 0, nil
-	}
-
-	// Try parsing as seconds first
-	if seconds, err := strconv.Atoi(retryAfter); err == nil {
-		return time.Duration(seconds) * time.Second, nil
-	}
-
-	// Try parsing as HTTP-date
-	if t, err := http.ParseTime(retryAfter); err == nil {
-		return time.Until(t), nil
-	}
-
-	return 0, nil
 }
 
 // withAlertClient returns the alerts with the configured alert client (see [WithAlertClient]) set on those

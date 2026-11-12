@@ -8,9 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/go-resty/resty/v2"
 	"github.com/slackmgr/types"
 )
 
@@ -75,7 +73,7 @@ func TestConnect_PingFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(server.URL)
+	client := New(server.URL, WithRetryCount(0))
 
 	err := client.Connect(context.Background())
 
@@ -869,91 +867,6 @@ func TestSanitizeURL(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfterHeader(t *testing.T) {
-	t.Parallel()
-
-	t.Run("empty header", func(t *testing.T) {
-		t.Parallel()
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			// No Retry-After header
-			w.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer server.Close()
-
-		resp := makeRestyRequest(t, server.URL)
-		duration, err := parseRetryAfterHeader(nil, resp)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if duration != 0 {
-			t.Errorf("expected 0 duration for empty header, got %v", duration)
-		}
-	})
-
-	t.Run("seconds format", func(t *testing.T) {
-		t.Parallel()
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Retry-After", "120")
-			w.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer server.Close()
-
-		resp := makeRestyRequest(t, server.URL)
-		duration, err := parseRetryAfterHeader(nil, resp)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if duration != 120*time.Second {
-			t.Errorf("expected 120s, got %v", duration)
-		}
-	})
-
-	t.Run("http-date format", func(t *testing.T) {
-		t.Parallel()
-
-		// Use a time in the future
-		futureTime := time.Now().Add(60 * time.Second)
-		httpDate := futureTime.UTC().Format(http.TimeFormat)
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Retry-After", httpDate)
-			w.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer server.Close()
-
-		resp := makeRestyRequest(t, server.URL)
-		duration, err := parseRetryAfterHeader(nil, resp)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		// Allow some tolerance for test execution time
-		if duration < 55*time.Second || duration > 65*time.Second {
-			t.Errorf("expected ~60s, got %v", duration)
-		}
-	})
-
-	t.Run("invalid format returns zero", func(t *testing.T) {
-		t.Parallel()
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Retry-After", "not-a-valid-value")
-			w.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer server.Close()
-
-		resp := makeRestyRequest(t, server.URL)
-		duration, err := parseRetryAfterHeader(nil, resp)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if duration != 0 {
-			t.Errorf("expected 0 duration for invalid header, got %v", duration)
-		}
-	})
-}
-
 func TestSendWithResponse_NilClient(t *testing.T) {
 	t.Parallel()
 
@@ -1145,19 +1058,6 @@ func TestSendWithResponse_NetworkError(t *testing.T) {
 	if meta != nil {
 		t.Errorf("expected nil metadata on network error, got %+v", meta)
 	}
-}
-
-// makeRestyRequest is a helper that makes a resty request and returns the response.
-func makeRestyRequest(t *testing.T, url string) *resty.Response {
-	t.Helper()
-
-	client := resty.New()
-	resp, err := client.R().Get(url)
-	if err != nil {
-		t.Fatalf("failed to make request: %v", err)
-	}
-
-	return resp
 }
 
 func TestSendAlert_DelegatesToSend(t *testing.T) {

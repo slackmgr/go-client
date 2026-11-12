@@ -80,7 +80,7 @@ Client creation differs and must be updated:
 | Legacy | New |
 |--------|-----|
 | `client, err := slacklib.NewAlertClient().Connect(ctx, baseURL, logger, opts...)` | `c := client.New(baseURL, opts...)` followed by `err := c.Connect(ctx)` |
-| `slacklib.RetryCount(n)`, `RetryWaitTime(d)`, `RetryMaxWaitTime(d)` | `client.WithRetryCount(n)`, `WithRetryWaitTime(d)`, `WithRetryMaxWaitTime(d)`. The default retry count is 3 (legacy: 8) |
+| `slacklib.RetryCount(n)`, `RetryWaitTime(d)`, `RetryMaxWaitTime(d)` | `client.WithRetryCount(n)`, `WithRetryBackoff(initial, max)`. The default retry count is 3 (legacy: 8) |
 | `logger` argument to `Connect` (`Debugf`, `Infof`, `Errorf`) | `client.WithRequestLogger(logger)` (optional; `Debugf`, `Warnf`, `Errorf`) |
 | `GetMappings(ctx)` | Not available |
 
@@ -90,17 +90,19 @@ All options are provided via `With*` constructor functions.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithRetryCount(int)` | `3` | Number of retry attempts (max 100) |
-| `WithRetryWaitTime(time.Duration)` | `500ms` | Initial wait time between retries (100ms–1min) |
-| `WithRetryMaxWaitTime(time.Duration)` | `3s` | Maximum wait time between retries (100ms–5min) |
-| `WithRetryPolicy(func(*resty.Response, error) bool)` | `DefaultRetryPolicy` | Custom retry condition function |
+| `WithRetryCount(int)` | `3` | Maximum retries after the first attempt, for failures accepted by the retry condition (max 100, 0 disables) |
+| `WithRetryCondition(func(statusCode int, err error) bool)` | `DefaultRetryCondition` | Decides whether a failed attempt is retried (default: 429, 5xx, transient connection errors). `statusCode` is 0 when no response was received |
+| `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries of 5xx and connection errors: starts at `initial`, doubles per retry up to `max` (initial 100ms–1min, max 100ms–5min). Not used for 429 |
+| `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest wait because of the rate limit: a 429's `Retry-After`, or client-side pacing (1s–10min). Longer waits return the 429 error right away |
+| `WithRateLimitPacing(bool)` | `true` | Pace alerts client-side against the API's per-channel rate limit (see below) |
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
 | `WithAuthToken(string)` | — | Token for `Authorization` header (mutually exclusive with `WithBasicAuth`) |
 | `WithAuthScheme(string)` | `"Bearer"` | Authentication scheme used with `WithAuthToken` |
 | `WithBasicAuth(username, password string)` | — | HTTP Basic authentication (mutually exclusive with `WithAuthToken`) |
-| `WithTimeout(time.Duration)` | `30s` | Per-request timeout (1s–5min) |
-| `WithUserAgent(string)` | `"slack-manager-go-client/1.0"` | `User-Agent` header value |
+| `WithTimeout(time.Duration)` | `30s` | Timeout of a single HTTP request, i.e. one attempt (1s–5min) |
+| `WithSendTimeout(time.Duration)` | `2m` | Maximum total time of `Send`/`SendWithResponse`, including retries and waits, when the context has no deadline (0 disables, 1s–1h). A context deadline takes precedence |
+| `WithUserAgent(string)` | `"slack-manager-go-client/<version>"` | `User-Agent` header value. The default uses the module version from the build info (`dev` if unknown) |
 | `WithMaxIdleConns(int)` | `100` | Maximum idle connections across all hosts |
 | `WithMaxConnsPerHost(int)` | `10` | Maximum connections per host (max 100) |
 | `WithIdleConnTimeout(time.Duration)` | `90s` | How long idle connections remain in the pool (1s–5min) |
@@ -113,9 +115,62 @@ All options are provided via `With*` constructor functions.
 
 ### Retry behaviour
 
-`DefaultRetryPolicy` retries on HTTP 429 (rate limit), 5xx server errors, and transient connection errors. It does **not** retry on context cancellation, deadline exceeded, or DNS resolution failures. `Retry-After` response headers are respected for rate-limit backoff.
+`DefaultRetryCondition` retries on HTTP 429 (rate limit), 5xx server errors, and transient connection errors, including connection refused (as while the API restarts or is redeployed). It does **not** retry on context cancellation, deadline exceeded, DNS resolution failures, or unreachable networks/hosts.
 
-Supply a custom function via `WithRetryPolicy` to override this behaviour.
+The total time of a send, including retries and waits, is limited by the context deadline, or `WithSendTimeout` (default 2 minutes) when the context has none. The defaults need no tuning: the client follows the status codes and `Retry-After`/`RateLimit-*` headers of the API.
+
+Supply a custom function via `WithRetryCondition` to override this behaviour. Call `DefaultRetryCondition` from it to extend the default:
+
+```go
+client.WithRetryCondition(func(statusCode int, err error) bool {
+    return statusCode == http.StatusConflict || client.DefaultRetryCondition(statusCode, err)
+})
+```
+
+Wait between attempts:
+
+- **429**: the API always sends `Retry-After`, and the client waits exactly that long. `WithMaxRateLimitWait` limits this wait
+- **5xx and connection errors**: exponential backoff with jitter (`WithRetryBackoff`)
+
+The client stops retrying early, returning the last error, when the `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline, since the retry could not succeed anyway.
+
+Retries are handled by the client itself, not resty, so requests made directly on `RestyClient()` are not retried.
+
+### Deprecated options
+
+These still work, but will be removed in a future major version:
+
+| Deprecated | Use instead |
+|------------|-------------|
+| `WithRetryWaitTime(d)`, `WithRetryMaxWaitTime(d)` | `WithRetryBackoff(initial, max)` |
+| `WithRetryPolicy(func(*resty.Response, error) bool)` | `WithRetryCondition(func(statusCode int, err error) bool)` |
+| `DefaultRetryPolicy` | `DefaultRetryCondition` |
+
+### Rate limit pacing
+
+The API limits alerts per Slack channel with a token bucket. By default, the client keeps its own copy of these buckets, so it can hold back a request the API would reject with 429 instead of sending it:
+
+- The bucket size and refill rate are learned from the `RateLimit-Limit` and `RateLimit-Policy` response headers. Nothing to configure
+- Each target (`SlackChannelID`, or `RouteKey` when no channel is set) has its own bucket, resynced from `RateLimit-Remaining` (or `Retry-After` on 429) after every response, so the API stays authoritative and alerts from other senders are accounted for
+- Before sending, the client waits until all targets of the request have enough tokens. Concurrent senders reserve tokens in turn, so they queue up instead of waking up together
+- If the wait exceeds `WithMaxRateLimitWait` or the context deadline, the request is not sent, and an `*APIError` with status 429, `NotSent: true` and the predicted wait in `RetryAfter` is returned
+- Until the limits are known, and for targets without recent alerts, nothing is delayed
+
+Other senders only drain tokens, so the client's estimate is an upper bound: it delays requests that would be rejected, not requests that would succeed. Disable with `WithRateLimitPacing(false)`.
+
+### Errors
+
+A non-2xx response (after retries) is returned as `*client.APIError`, with the status code, error message, `Retry-After` wait and number of attempts. `NotSent` is set when rate limit pacing did not send the request. Rate limiting, by the API or predicted by the client, matches `client.ErrRateLimited`:
+
+```go
+err := c.Send(ctx, alert)
+
+if errors.Is(err, client.ErrRateLimited) {
+    var apiErr *client.APIError
+    errors.As(err, &apiErr)
+    // Try again after apiErr.RetryAfter
+}
+```
 
 ### Logging
 

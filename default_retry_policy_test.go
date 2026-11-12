@@ -53,7 +53,6 @@ func TestDefaultRetryPolicy_PermanentConnErrors(t *testing.T) {
 		name string
 		err  syscall.Errno
 	}{
-		{"connection refused", syscall.ECONNREFUSED},
 		{"network unreachable", syscall.ENETUNREACH},
 		{"host unreachable", syscall.EHOSTUNREACH},
 		{"permission denied", syscall.EACCES},
@@ -198,4 +197,44 @@ func createRestyResponse(t *testing.T, statusCode int) *resty.Response {
 	}
 
 	return resp
+}
+
+func TestDefaultRetryCondition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		err        error
+		expected   bool
+	}{
+		{"429", http.StatusTooManyRequests, nil, true},
+		{"500", http.StatusInternalServerError, nil, true},
+		{"503", http.StatusServiceUnavailable, nil, true},
+		{"200", http.StatusOK, nil, false},
+		{"400", http.StatusBadRequest, nil, false},
+		{"no response, transient error", 0, net.ErrClosed, true},
+		{"no response, context canceled", 0, context.Canceled, false},
+		{"no response, connection refused", 0, &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, true},
+		{"no response, host unreachable", 0, &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, false},
+		{"no response, no error", 0, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := DefaultRetryCondition(tt.statusCode, tt.err); got != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestDefaultRetryPolicy_NilResponse(t *testing.T) {
+	t.Parallel()
+
+	if DefaultRetryPolicy(nil, nil) {
+		t.Error("expected false for nil response without error")
+	}
 }

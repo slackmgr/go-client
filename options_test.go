@@ -2,6 +2,8 @@ package client
 
 import (
 	"crypto/tls"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,10 @@ func TestNewClientOptions(t *testing.T) {
 		t.Errorf("expected retryMaxWaitTime=3s, got %v", opts.retryMaxWaitTime)
 	}
 
+	if opts.maxRateLimitWait != time.Minute {
+		t.Errorf("expected maxRateLimitWait=1m, got %v", opts.maxRateLimitWait)
+	}
+
 	if opts.requestLogger == nil {
 		t.Error("expected requestLogger to be set")
 	}
@@ -47,8 +53,12 @@ func TestNewClientOptions(t *testing.T) {
 		t.Errorf("expected timeout=30s, got %v", opts.timeout)
 	}
 
-	if opts.userAgent != "slack-manager-go-client/1.0" {
-		t.Errorf("expected userAgent=slack-manager-go-client/1.0, got %s", opts.userAgent)
+	if opts.userAgent != defaultUserAgent() {
+		t.Errorf("expected userAgent=%s, got %s", defaultUserAgent(), opts.userAgent)
+	}
+
+	if opts.sendTimeout != 2*time.Minute {
+		t.Errorf("expected sendTimeout=2m, got %v", opts.sendTimeout)
 	}
 
 	if opts.maxIdleConns != 100 {
@@ -142,6 +152,108 @@ func TestWithRetryWaitTime(t *testing.T) {
 	}
 }
 
+func TestWithSendTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    time.Duration
+		expected time.Duration
+	}{
+		{"valid", 5 * time.Minute, 5 * time.Minute},
+		{"disabled", 0, 0},
+		{"minimum", time.Second, time.Second},
+		{"maximum", time.Hour, time.Hour},
+		{"below minimum ignored", 500 * time.Millisecond, 2 * time.Minute},
+		{"negative ignored", -time.Second, 2 * time.Minute},
+		{"above maximum ignored", 2 * time.Hour, 2 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := newClientOptions()
+			WithSendTimeout(tt.input)(opts)
+
+			if opts.sendTimeout != tt.expected {
+				t.Errorf("expected sendTimeout=%v, got %v", tt.expected, opts.sendTimeout)
+			}
+		})
+	}
+}
+
+func TestWithRetryBackoff(t *testing.T) {
+	t.Parallel()
+
+	opts := newClientOptions()
+	WithRetryBackoff(time.Second, 10*time.Second)(opts)
+
+	if opts.retryWaitTime != time.Second || opts.retryMaxWaitTime != 10*time.Second {
+		t.Errorf("expected 1s and 10s, got %v and %v", opts.retryWaitTime, opts.retryMaxWaitTime)
+	}
+
+	// Invalid combinations are rejected by Validate.
+	WithRetryBackoff(2*time.Second, time.Second)(opts)
+
+	if err := opts.Validate(); err == nil {
+		t.Error("expected max below initial to be rejected")
+	}
+
+	WithRetryBackoff(0, time.Second)(opts)
+
+	if err := opts.Validate(); err == nil {
+		t.Error("expected zero initial to be rejected")
+	}
+}
+
+func TestWithRetryCondition(t *testing.T) {
+	t.Parallel()
+
+	t.Run("receives status code", func(t *testing.T) {
+		t.Parallel()
+
+		var got int
+
+		opts := newClientOptions()
+		WithRetryCondition(func(statusCode int, _ error) bool {
+			got = statusCode
+			return true
+		})(opts)
+
+		if !opts.retryPolicy(nil, errors.New("boom")) || got != 0 {
+			t.Errorf("expected status 0 without response, got %d", got)
+		}
+
+		resp := &resty.Response{RawResponse: &http.Response{StatusCode: http.StatusConflict}}
+		if !opts.retryPolicy(resp, nil) || got != http.StatusConflict {
+			t.Errorf("expected status 409, got %d", got)
+		}
+	})
+
+	t.Run("nil ignored", func(t *testing.T) {
+		t.Parallel()
+
+		opts := newClientOptions()
+		WithRetryCondition(nil)(opts)
+
+		if opts.retryPolicy == nil {
+			t.Error("nil condition should be ignored")
+		}
+	})
+
+	t.Run("default", func(t *testing.T) {
+		t.Parallel()
+
+		opts := newClientOptions()
+		resp := &resty.Response{RawResponse: &http.Response{StatusCode: http.StatusTooManyRequests}}
+
+		if !opts.retryPolicy(resp, nil) {
+			t.Error("expected default condition to retry 429")
+		}
+	})
+}
+
 func TestWithRetryMaxWaitTime(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +276,35 @@ func TestWithRetryMaxWaitTime(t *testing.T) {
 
 			if opts.retryMaxWaitTime != tt.expected {
 				t.Errorf("expected retryMaxWaitTime=%v, got %v", tt.expected, opts.retryMaxWaitTime)
+			}
+		})
+	}
+}
+
+func TestWithMaxRateLimitWait(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    time.Duration
+		expected time.Duration
+	}{
+		{"valid", 2 * time.Minute, 2 * time.Minute},
+		{"minimum valid", time.Second, time.Second},
+		{"maximum valid", 10 * time.Minute, 10 * time.Minute},
+		{"below minimum ignored", 500 * time.Millisecond, time.Minute}, // default is 1m
+		{"above maximum ignored", 11 * time.Minute, time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := newClientOptions()
+			WithMaxRateLimitWait(tt.input)(opts)
+
+			if opts.maxRateLimitWait != tt.expected {
+				t.Errorf("expected maxRateLimitWait=%v, got %v", tt.expected, opts.maxRateLimitWait)
 			}
 		})
 	}
@@ -365,7 +506,7 @@ func TestWithUserAgent(t *testing.T) {
 		opts := newClientOptions()
 		WithUserAgent("")(opts)
 
-		if opts.userAgent != "slack-manager-go-client/1.0" {
+		if opts.userAgent != defaultUserAgent() {
 			t.Errorf("expected default userAgent, got %s", opts.userAgent)
 		}
 	})
@@ -540,22 +681,32 @@ func TestOptionsValidate(t *testing.T) {
 		{
 			name:      "retryWaitTime below minimum",
 			modify:    func(o *Options) { o.retryWaitTime = 50 * time.Millisecond },
-			wantError: "retryWaitTime must be at least 100ms",
+			wantError: "retry backoff initial wait (WithRetryBackoff) must be at least 100ms",
 		},
 		{
 			name:      "retryWaitTime exceeds max",
 			modify:    func(o *Options) { o.retryWaitTime = 2 * time.Minute },
-			wantError: "retryWaitTime must not exceed 1m0s",
+			wantError: "retry backoff initial wait (WithRetryBackoff) must not exceed 1m0s",
+		},
+		{
+			name:      "maxRateLimitWait below minimum",
+			modify:    func(o *Options) { o.maxRateLimitWait = 500 * time.Millisecond },
+			wantError: "max rate limit wait (WithMaxRateLimitWait) must be at least 1s",
+		},
+		{
+			name:      "maxRateLimitWait exceeds max",
+			modify:    func(o *Options) { o.maxRateLimitWait = 11 * time.Minute },
+			wantError: "max rate limit wait (WithMaxRateLimitWait) must not exceed 10m0s",
 		},
 		{
 			name:      "retryMaxWaitTime below minimum",
 			modify:    func(o *Options) { o.retryMaxWaitTime = 50 * time.Millisecond },
-			wantError: "retryMaxWaitTime must be at least 100ms",
+			wantError: "retry backoff max wait (WithRetryBackoff) must be at least 100ms",
 		},
 		{
 			name:      "retryMaxWaitTime exceeds max",
 			modify:    func(o *Options) { o.retryMaxWaitTime = 6 * time.Minute },
-			wantError: "retryMaxWaitTime must not exceed 5m0s",
+			wantError: "retry backoff max wait (WithRetryBackoff) must not exceed 5m0s",
 		},
 		{
 			name: "retryMaxWaitTime less than retryWaitTime",
@@ -563,7 +714,7 @@ func TestOptionsValidate(t *testing.T) {
 				o.retryWaitTime = 1 * time.Second
 				o.retryMaxWaitTime = 500 * time.Millisecond
 			},
-			wantError: "retryMaxWaitTime (500ms) must be greater than or equal to retryWaitTime (1s)",
+			wantError: "retry backoff max wait (500ms) must be greater than or equal to the initial wait (1s) (WithRetryBackoff)",
 		},
 		{
 			name:      "nil requestLogger",
