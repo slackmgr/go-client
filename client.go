@@ -72,11 +72,16 @@ func New(baseURL string, opts ...Option) *Client {
 }
 
 // Connect initializes the HTTP client and validates connectivity by pinging
-// the API (with retries, see [WithRetryCount]). It is safe for concurrent use.
-// Once Connect has succeeded, further calls return nil without doing anything.
-// If it fails, the client stays unconnected and Connect can be called again,
-// e.g. after the API has become available.
+// the API (with retries, see [WithRetryCount]). Like [Client.Send], it is
+// limited to [WithSendTimeout] when ctx has no deadline. It is safe for
+// concurrent use. Once Connect has succeeded, further calls return nil without
+// doing anything. If it fails, the client stays unconnected and Connect can be
+// called again, e.g. after the API has become available.
 func (c *Client) Connect(ctx context.Context) error {
+	if c == nil {
+		return errors.New("alert client is nil")
+	}
+
 	c.connectMu.Lock()
 	defer c.connectMu.Unlock()
 
@@ -84,8 +89,8 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	if c.baseURL == "" {
-		return errors.New("base URL must be set")
+	if err := validateBaseURL(c.baseURL); err != nil {
+		return err
 	}
 
 	if err := c.options.Validate(); err != nil {
@@ -93,6 +98,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	conn := c.newConnection()
+
+	ctx, cancel := c.withSendTimeout(ctx)
+	defer cancel()
 
 	if err := c.ping(ctx, conn.client); err != nil {
 		conn.transport.CloseIdleConnections()
@@ -115,11 +123,15 @@ func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
 // [Client.Connect] must be called first. Returns an error if the alerts slice is empty or
 // any element is nil.
 //
-// The returned *ResponseMetadata describes the response to the last attempt, even on
-// non-2xx. It is nil when the last attempt got no response (a network-level error), or
-// when client-side rate limit pacing ([WithRateLimitPacing]) stopped the first attempt
-// from being sent. When pacing stops a retry from being sent, it describes the response
-// to the previous attempt.
+// The returned *ResponseMetadata describes the response to the last attempt that was
+// sent, even on non-2xx. It is nil when that attempt got no response (a network-level
+// error), or when no attempt was sent: client-side rate limit pacing
+// ([WithRateLimitPacing]) did not send the first attempt, or the context was done while
+// pacing waited for it. When pacing does not send a retry, or the context is done while
+// waiting for a retry, it describes the response to the previous attempt.
+//
+// When the context is done while waiting for a retry, the error wraps both the error of
+// the previous attempt (e.g. an [*APIError]) and the context error.
 func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (*ResponseMetadata, error) {
 	if c == nil {
 		return nil, errors.New("alert client is nil")
@@ -154,14 +166,28 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 		return nil, fmt.Errorf("failed to marshal alerts list: %w", err)
 	}
 
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.options.sendTimeout > 0 {
-		var cancel context.CancelFunc
+	ctx, cancel := c.withSendTimeout(ctx)
+	defer cancel()
 
-		ctx, cancel = context.WithTimeout(ctx, c.options.sendTimeout)
-		defer cancel()
+	return c.post(ctx, conn.client, c.options.alertsEndpoint, body, targets)
+}
+
+// validateBaseURL checks that the base URL is an absolute http or https URL.
+func validateBaseURL(baseURL string) error {
+	if baseURL == "" {
+		return errors.New("base URL must be set")
 	}
 
-	return c.postWithResponse(ctx, conn.client, c.options.alertsEndpoint, body, targets)
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("base URL %s must be an absolute http or https URL", sanitizeURL(baseURL))
+	}
+
+	return nil
 }
 
 // SendAlert posts a single alert to the API. It is equivalent to [Client.Send] with one alert.
@@ -179,16 +205,22 @@ func (c *Client) SendAlerts(ctx context.Context, alerts []*types.Alert) error {
 }
 
 // Close releases idle connections held by the client. After Close is called
-// the client should not be reused.
+// the client should not be reused. Close on a nil or unconnected client does
+// nothing.
 func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+
 	if conn := c.conn.Load(); conn != nil {
 		conn.transport.CloseIdleConnections()
 	}
 }
 
-// Ping checks connectivity to the API. [Client.Connect] must be called
-// first. Use this to verify the connection is still healthy after the
-// initial connect.
+// Ping checks connectivity to the API, with retries (see [WithRetryCount]).
+// [Client.Connect] must be called first. Use this to verify the connection is
+// still healthy after the initial connect. Like [Client.Send], it is limited
+// to [WithSendTimeout] when ctx has no deadline.
 func (c *Client) Ping(ctx context.Context) error {
 	if c == nil {
 		return errors.New("alert client is nil")
@@ -199,20 +231,36 @@ func (c *Client) Ping(ctx context.Context) error {
 		return errors.New("client not connected - call Connect() first")
 	}
 
+	ctx, cancel := c.withSendTimeout(ctx)
+	defer cancel()
+
 	return c.ping(ctx, conn.client)
 }
 
 // RestyClient returns the underlying resty.Client for advanced configuration.
-// Returns nil until [Client.Connect] has succeeded. Use with caution:
+// Returns nil until [Client.Connect] has succeeded, and for a nil client. Use with caution:
 // direct modifications may affect client behaviour. Retries are handled by
 // [Client], not resty, so requests made directly on the resty client are not
 // retried.
 func (c *Client) RestyClient() *resty.Client {
+	if c == nil {
+		return nil
+	}
+
 	if conn := c.conn.Load(); conn != nil {
 		return conn.client
 	}
 
 	return nil
+}
+
+// withSendTimeout returns ctx limited to [WithSendTimeout] if it has no deadline, and ctx itself otherwise.
+func (c *Client) withSendTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline || c.options.sendTimeout <= 0 {
+		return ctx, func() {}
+	}
+
+	return context.WithTimeout(ctx, c.options.sendTimeout)
 }
 
 // newConnection creates the HTTP client from the options.
@@ -230,7 +278,7 @@ func (c *Client) newConnection() *connection {
 		SetBaseURL(c.baseURL).
 		SetTimeout(c.options.timeout).
 		SetTransport(transport).
-		SetRedirectPolicy(resty.FlexibleRedirectPolicy(c.options.maxRedirects)).
+		SetRedirectPolicy(redirectPolicy(c.options.maxRedirects)).
 		SetLogger(c.options.requestLogger).
 		SetHeader("User-Agent", c.options.userAgent)
 
@@ -248,41 +296,37 @@ func (c *Client) newConnection() *connection {
 	return &connection{client: client, transport: transport}
 }
 
+// redirectPolicy follows up to maxRedirects redirects. Beyond that, the redirect response itself is returned
+// (as an [*APIError]), instead of resty's "stopped after N redirects" error, which would be retried.
+//
+// via holds the requests made so far, so len(via) is the number of the redirect about to be followed. Following
+// is delegated to resty's policy for its header handling, with a limit it never reaches: it stops when
+// len(via) reaches its limit, i.e. it follows one redirect less than its limit.
+func redirectPolicy(maxRedirects int) resty.RedirectPolicyFunc {
+	follow := resty.FlexibleRedirectPolicy(maxRedirects + 1)
+
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) > maxRedirects {
+			return http.ErrUseLastResponse
+		}
+
+		return follow.Apply(req, via)
+	}
+}
+
 func (c *Client) ping(ctx context.Context, client *resty.Client) error {
-	return c.get(ctx, client, c.options.pingEndpoint)
+	_, err := c.execute(ctx, client, http.MethodGet, c.options.pingEndpoint, nil, nil)
+	return err
 }
 
-func (c *Client) get(ctx context.Context, client *resty.Client, path string) error {
-	response, attempts, err := c.execute(ctx, client, http.MethodGet, path, nil, nil)
-	if err != nil {
-		return fmt.Errorf("GET %s failed: %w", path, err)
-	}
-
-	if !response.IsSuccess() {
-		return newAPIError(response, attempts)
-	}
-
-	return nil
+func (c *Client) post(ctx context.Context, client *resty.Client, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
+	response, err := c.execute(ctx, client, http.MethodPost, path, body, targets)
+	return responseMetadata(response), err
 }
 
-func (c *Client) postWithResponse(ctx context.Context, client *resty.Client, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
-	response, attempts, err := c.execute(ctx, client, http.MethodPost, path, body, targets)
-
-	if _, ok := errors.AsType[*APIError](err); ok {
-		return responseMetadata(response), err
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("POST %s failed: %w", path, err)
-	}
-
-	meta := responseMetadata(response)
-
-	if !response.IsSuccess() {
-		return meta, newAPIError(response, attempts)
-	}
-
-	return meta, nil
+// requestURL returns the URL of a request to path, with any credentials redacted.
+func (c *Client) requestURL(path string) string {
+	return sanitizeURL(strings.TrimSuffix(c.baseURL, "/") + "/" + strings.TrimPrefix(path, "/"))
 }
 
 // responseMetadata returns the metadata of a response, or nil if there is none.
@@ -298,18 +342,28 @@ func responseMetadata(response *resty.Response) *ResponseMetadata {
 	}
 }
 
-// newAPIError creates an [*APIError] from a non-2xx response.
-func newAPIError(response *resty.Response, attempts int) *APIError {
+// newAPIError creates an [*APIError] from a non-2xx response to a request with the given method and path.
+func (c *Client) newAPIError(response *resty.Response, method, path string, attempts int) *APIError {
 	wait, _ := retryAfter(response, time.Now())
 
-	return &APIError{
-		Method:     response.Request.Method,
-		URL:        sanitizeURL(response.Request.URL),
-		StatusCode: response.StatusCode(),
-		Message:    getBodyErrorMessage(response),
+	apiErr := &APIError{
+		Method:     method,
+		URL:        c.requestURL(path),
+		StatusCode: statusCode(response),
+		Message:    "(no response)",
 		RetryAfter: wait,
 		Attempts:   attempts,
 	}
+
+	if response != nil {
+		apiErr.Message = getBodyErrorMessage(response)
+
+		if response.Request != nil && response.Request.URL != "" {
+			apiErr.URL = sanitizeURL(response.Request.URL)
+		}
+	}
+
+	return apiErr
 }
 
 func flattenHeaders(h http.Header) map[string]string {

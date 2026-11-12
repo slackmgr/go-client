@@ -1247,3 +1247,57 @@ func TestSend_WithoutAlertClient(t *testing.T) {
 		t.Errorf("expected no client in body, got: %s", capturedBody)
 	}
 }
+
+func TestValidateBaseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		baseURL string
+		valid   bool
+	}{
+		{"http", "http://localhost:8080", true},
+		{"https with path", "https://api.example.com/v1/", true},
+		{"empty", "", false},
+		{"no scheme", "localhost:8080", false},
+		{"relative", "/api", false},
+		{"unsupported scheme", "ftp://example.com", false},
+		{"no host", "http://", false},
+		{"unparsable", "http://[::1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := validateBaseURL(tt.baseURL); (err == nil) != tt.valid {
+				t.Errorf("expected valid=%v, got %v", tt.valid, err)
+			}
+		})
+	}
+}
+
+func TestValidateBaseURL_RedactsCredentials(t *testing.T) {
+	t.Parallel()
+
+	err := New("ftp://user:secret@example.com").Connect(t.Context())
+	if err == nil || strings.Contains(err.Error(), "secret") {
+		t.Errorf("expected an error without the password, got %v", err)
+	}
+}
+
+func TestClient_NilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var c *Client
+
+	c.Close()
+
+	if c.RestyClient() != nil {
+		t.Error("expected nil resty client")
+	}
+
+	if err := c.Connect(t.Context()); err == nil {
+		t.Error("expected error from Connect on nil client")
+	}
+}

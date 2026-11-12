@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -30,8 +31,11 @@ var permanentConnErrors = []syscall.Errno{ //nolint:gochecknoglobals
 // [WithRetryCondition]). It retries on HTTP 429 (rate limit), 5xx server
 // errors and transient connection errors, including connection refused (as
 // while the API restarts) and attempts that exceed [WithTimeout]. It does not
-// retry on context cancellation, DNS resolution failures, or permanent
-// connection failures (network/host unreachable, permission denied).
+// retry on context cancellation, DNS resolution failures, permanent
+// connection failures (network/host unreachable, permission denied), or TLS
+// errors that retrying cannot fix: server certificate verification failures
+// (unknown authority, wrong host name, expired) and a server that does not
+// speak TLS.
 //
 // The client never retries once the context of the send is done (cancelled or
 // past its deadline), regardless of the retry condition.
@@ -60,6 +64,16 @@ func DefaultRetryCondition(statusCode int, err error) bool {
 					return false
 				}
 			}
+		}
+
+		// Don't retry when the server certificate fails verification, or the server does not speak TLS. Both
+		// are configuration errors that give the same result every time.
+		if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
+			return false
+		}
+
+		if _, ok := errors.AsType[tls.RecordHeaderError](err); ok {
+			return false
 		}
 
 		// Retry on other connection errors

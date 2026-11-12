@@ -120,13 +120,14 @@ func WithRetryCount(count int) Option {
 	}
 }
 
-// WithRetryBackoff sets the backoff between retries of 5xx responses and
-// connection errors: the backoff starts at initial and doubles with each
-// retry, up to maxWait, and each wait is a random duration between half and
-// all of the backoff (jitter). It does not apply to responses with a
-// Retry-After header, such as the API's 429 responses, which wait for the
-// header instead (see [WithMaxRateLimitWait]). The default is 500ms initial
-// and 3s max.
+// WithRetryBackoff sets the backoff between retries of failed attempts
+// without a Retry-After header, i.e. 5xx responses, connection errors, and
+// any other failure the retry condition ([WithRetryCondition]) retries: the
+// backoff starts at initial and doubles with each retry, up to maxWait, and
+// each wait is a random duration between half and all of the backoff
+// (jitter). It does not apply to responses with a Retry-After header, such as
+// the API's 429 responses, which wait for the header instead (see
+// [WithMaxRateLimitWait]). The default is 500ms initial and 3s max.
 //
 // initial must be 100ms–1 minute, and maxWait 100ms–5 minutes and at least
 // initial; this is validated by [Client.Connect].
@@ -169,11 +170,14 @@ func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 //   - Before sending, when client-side pacing ([WithRateLimitPacing]) predicts
 //     a 429.
 //
-// If the wait would be longer than this, or past the context deadline, the
-// client returns an [*APIError] right away (status 429, or the status of the
-// response with the Retry-After header), instead of a request or retry that
-// could not succeed. [APIError.RetryAfter] tells when to try again, and
-// [APIError.NotSent] whether the last request was sent.
+// If the wait would be longer than this, the client returns an [*APIError]
+// right away (status 429, or the status of the response with the Retry-After
+// header), instead of a request or retry that could not succeed.
+// [APIError.RetryAfter] tells when to try again, and [APIError.NotSent]
+// whether the last request was sent. The same applies when the wait would
+// pass the context deadline, which also stops backoff waits ([WithRetryBackoff]);
+// then the last error is returned, which is a transport error when the last
+// attempt got no response.
 //
 // The default is 1 minute. Valid range is 1s–10 minutes; values outside it
 // are silently ignored. Retries of 429 responses count against
@@ -319,11 +323,12 @@ func WithTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithSendTimeout sets the maximum total time of [Client.Send] and
-// [Client.SendWithResponse], including retries, backoff and rate limit
-// waits, when the context has no deadline. A context deadline always takes
-// precedence. The default is 2 minutes. 0 disables the limit, so that a send
-// without a context deadline is only limited by the retry options.
+// WithSendTimeout sets the maximum total time of [Client.Send],
+// [Client.SendWithResponse], [Client.Ping] and [Client.Connect], including
+// retries, backoff and rate limit waits, when the context has no deadline. A
+// context deadline always takes precedence. The default is 2 minutes. 0
+// disables the limit, so that a call without a context deadline is only
+// limited by the retry options.
 //
 // When a wait would pass the limit, the client returns the last error right
 // away instead of waiting (e.g. an [*APIError] with status 429 and
@@ -394,9 +399,11 @@ func WithDisableKeepAlive(disable bool) Option {
 }
 
 // WithMaxRedirects sets the maximum number of redirects to follow. Use 0
-// to disable redirects entirely. The default is 10. The maximum is 20.
-// Negative values or values greater than 20 are silently ignored and the
-// default is retained.
+// to disable redirects entirely. A redirect beyond the maximum is not
+// followed, and the redirect response is returned as an [*APIError] with its
+// 3xx status code (not retried by [DefaultRetryCondition]). The default is
+// 10. The maximum is 20. Negative values or values greater than 20 are
+// silently ignored and the default is retained.
 func WithMaxRedirects(n int) Option {
 	return func(o *Options) {
 		if n >= 0 && n <= maxMaxRedirects {

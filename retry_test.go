@@ -229,6 +229,159 @@ func TestRetry_ContextCancelledDuringWait(t *testing.T) {
 	if !errors.Is(err, ErrRateLimited) {
 		t.Errorf("expected last rate limit error, got %v", err)
 	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestRetry_ContextCancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
+
+	server, _ := sequenceServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	c := connectedClient(t, server.URL, WithRetryBackoff(2*time.Second, 2*time.Second))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	meta, err := c.SendWithResponse(ctx, types.NewErrorAlert())
+
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Attempts != 1 {
+		t.Errorf("expected the 503 of the first attempt, got %v", err)
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	if meta == nil || meta.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected the metadata of the first attempt, got %+v", meta)
+	}
+}
+
+func TestRetry_ContextCancelledDuringBackoffAfterTransportError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	c := connectedClient(t, server.URL, WithRetryBackoff(2*time.Second, 2*time.Second))
+	server.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	meta, err := c.SendWithResponse(ctx, types.NewErrorAlert())
+
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "POST alerts failed") {
+		t.Errorf("expected the transport error and context.Canceled, got %v", err)
+	}
+
+	if meta != nil {
+		t.Errorf("expected nil metadata without a response, got %+v", meta)
+	}
+}
+
+func TestRetry_RedirectsNotRetried(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		maxRedirects int
+		requests     int32
+	}{
+		{"redirects disabled", 0, 1},
+		{"redirect limit exceeded", 2, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, count := sequenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/alerts", http.StatusTemporaryRedirect)
+			})
+			c := connectedClient(t, server.URL, WithMaxRedirects(tt.maxRedirects))
+
+			meta, err := c.SendWithResponse(t.Context(), types.NewErrorAlert())
+
+			apiErr, ok := errors.AsType[*APIError](err)
+			if !ok || apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.Attempts != 1 {
+				t.Errorf("expected a single 307 APIError, got %v", err)
+			}
+
+			if meta == nil || meta.StatusCode != http.StatusTemporaryRedirect {
+				t.Errorf("expected the metadata of the redirect, got %+v", meta)
+			}
+
+			if count.Load() != tt.requests {
+				t.Errorf("expected %d requests, got %d", tt.requests, count.Load())
+			}
+		})
+	}
+}
+
+func TestRetry_RedirectFollowed(t *testing.T) {
+	t.Parallel()
+
+	server, count := sequenceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/alerts", http.StatusTemporaryRedirect)
+	}, accepted)
+	c := connectedClient(t, server.URL, WithMaxRedirects(1))
+
+	if err := c.Send(t.Context(), types.NewErrorAlert()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if count.Load() != 2 {
+		t.Errorf("expected 2 requests, got %d", count.Load())
+	}
+}
+
+func TestRetry_PingAndConnectLimitedBySendTimeout(t *testing.T) {
+	t.Parallel()
+
+	var failing atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	opts := []Option{WithSendTimeout(time.Second), WithRetryCount(10), WithRetryBackoff(2*time.Second, 2*time.Second)}
+
+	c := New(server.URL, opts...)
+	if err := c.Connect(t.Context()); err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+
+	failing.Store(true)
+
+	for name, call := range map[string]func() error{
+		"Connect": func() error { return New(server.URL, opts...).Connect(context.Background()) },
+		"Ping":    func() error { return c.Ping(context.Background()) },
+	} {
+		started := time.Now()
+		err := call()
+
+		// The 2s backoff would pass the 1s send timeout, so the client stops after the first attempt.
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Errorf("%s: expected to stop before the send timeout, took %v", name, elapsed)
+		}
+
+		if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Attempts != 1 {
+			t.Errorf("%s: expected a single 503, got %v", name, err)
+		}
+	}
 }
 
 func TestRetry_PingRetries(t *testing.T) {
@@ -275,6 +428,10 @@ func TestRetryAfter(t *testing.T) {
 		{"future date", now.Add(time.Minute).Format(http.TimeFormat), time.Minute, true},
 		{"past date", now.Add(-time.Minute).Format(http.TimeFormat), 0, true},
 		{"invalid", "soon", 0, false},
+		{"seconds above the cap", "86401", maxRetryAfter, true},
+		{"seconds overflowing time.Duration", "99999999999", maxRetryAfter, true},
+		{"seconds overflowing int", "999999999999999999999", 0, false},
+		{"date above the cap", now.Add(48 * time.Hour).Format(http.TimeFormat), maxRetryAfter, true},
 	}
 
 	for _, tt := range tests {

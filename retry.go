@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -13,8 +14,10 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-// execute sends the request, retrying according to the retry policy. It returns the last response and error,
-// and the number of attempts made.
+// execute sends the request, retrying according to the retry policy. It returns the response to the last attempt
+// (nil if no attempt got one), and an error if the last attempt failed: an [*APIError] for a non-2xx response, and
+// the wrapped transport error otherwise. When the context is done while waiting for a retry, the error also wraps
+// the context error, so that both [errors.Is] with the context error and [errors.As] with the last error work.
 //
 // The wait between attempts is the Retry-After header value when present (up to maxRateLimitWait), and capped
 // exponential backoff with jitter otherwise. Retrying stops early when the API asks for a longer wait than
@@ -23,13 +26,20 @@ import (
 // When pacing is enabled and targets is non-nil, each attempt first waits until the client's model of the API's
 // rate limiter (see [pacer]) has tokens for all targets. If that wait exceeds maxRateLimitWait or the context
 // deadline, the request is not sent and an [*APIError] with status 429 and [APIError.NotSent] is returned.
-func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte, targets map[string]int) (*resty.Response, int, error) {
-	var lastResponse *resty.Response
+func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte, targets map[string]int) (*resty.Response, error) {
+	var (
+		lastResponse *resty.Response
+		lastErr      error
+	)
 
 	for attempt := 1; ; attempt++ {
 		res, err := c.pace(ctx, method, path, targets, attempt)
 		if err != nil {
-			return lastResponse, attempt - 1, err
+			if _, notSent := errors.AsType[*APIError](err); notSent {
+				return lastResponse, err
+			}
+
+			return lastResponse, cancelled(lastErr, err)
 		}
 
 		request := client.R().SetContext(ctx)
@@ -44,30 +54,47 @@ func (c *Client) execute(ctx context.Context, client *resty.Client, method, path
 			c.pacer.update(targets, res, response)
 		}
 
-		failed := err != nil || response == nil || !response.IsSuccess()
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("%s %s failed: %w", method, path, err)
+		case response == nil || !response.IsSuccess():
+			lastErr = c.newAPIError(response, method, path, attempt)
+		default:
+			return response, nil
+		}
 
-		if !failed || ctx.Err() != nil || attempt > c.options.retryCount || !c.options.retryPolicy(response, err) {
-			return response, attempt, err
+		if ctx.Err() != nil || attempt > c.options.retryCount || !c.options.retryPolicy(response, err) {
+			return response, lastErr
 		}
 
 		wait, fromHeader := c.retryWait(response, attempt)
 
 		if fromHeader && wait > c.options.maxRateLimitWait {
 			c.options.requestLogger.Warnf("%s %s: not retrying, Retry-After %v exceeds the max wait %v", method, path, wait, c.options.maxRateLimitWait)
-			return response, attempt, err
+			return response, lastErr
 		}
 
 		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
 			c.options.requestLogger.Warnf("%s %s: not retrying, wait %v exceeds the context deadline", method, path, wait)
-			return response, attempt, err
+			return response, lastErr
 		}
 
 		c.options.requestLogger.Debugf("%s %s: attempt %d failed, retrying in %v", method, path, attempt, wait)
 
 		if !sleep(ctx, wait) {
-			return response, attempt, err
+			return response, cancelled(lastErr, ctx.Err())
 		}
 	}
+}
+
+// cancelled returns the error of a send whose context was done while waiting for an attempt: ctxErr, wrapped
+// together with the error of the previous attempt, if any.
+func cancelled(lastErr, ctxErr error) error {
+	if lastErr == nil {
+		return ctxErr
+	}
+
+	return fmt.Errorf("%w (retry cancelled: %w)", lastErr, ctxErr)
 }
 
 // pace waits until the pacer has tokens for the targets, and marks the returned reservation as sent. It returns
@@ -89,7 +116,7 @@ func (c *Client) pace(ctx context.Context, method, path string, targets map[stri
 
 			return nil, &APIError{
 				Method:     method,
-				URL:        sanitizeURL(strings.TrimSuffix(c.baseURL, "/") + "/" + strings.TrimPrefix(path, "/")),
+				URL:        c.requestURL(path),
 				StatusCode: http.StatusTooManyRequests,
 				Message:    fmt.Sprintf("Rate limit exceeded for %s (predicted by the client, request not sent)", target),
 				RetryAfter: wait,
@@ -120,9 +147,14 @@ func (c *Client) retryWait(response *resty.Response, attempt int) (time.Duration
 	return backoff(c.options.retryWaitTime, c.options.retryMaxWaitTime, attempt), false
 }
 
+// maxRetryAfter caps the Retry-After waits parsed by [retryAfter], so that huge values cannot overflow
+// [time.Duration]. It matches the longest Retry-After the API sends (when the requested tokens can never be
+// available), and is far above [maxMaxRateLimitWait], so a capped wait is never waited for.
+const maxRetryAfter = 24 * time.Hour
+
 // retryAfter parses the Retry-After header of the response, as either delay seconds or an HTTP date relative
-// to now. A date in the past gives zero, i.e. retry immediately. The bool is false when the header is absent or
-// invalid.
+// to now, capped at [maxRetryAfter]. A date in the past gives zero, i.e. retry immediately. The bool is false
+// when the header is absent or invalid.
 func retryAfter(response *resty.Response, now time.Time) (time.Duration, bool) {
 	if response == nil || response.RawResponse == nil {
 		return 0, false
@@ -138,11 +170,15 @@ func retryAfter(response *resty.Response, now time.Time) (time.Duration, bool) {
 			return 0, false
 		}
 
+		if seconds > int(maxRetryAfter/time.Second) {
+			return maxRetryAfter, true
+		}
+
 		return time.Duration(seconds) * time.Second, true
 	}
 
 	if t, err := http.ParseTime(value); err == nil {
-		return max(t.Sub(now), 0), true
+		return min(max(t.Sub(now), 0), maxRetryAfter), true
 	}
 
 	return 0, false

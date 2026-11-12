@@ -2,9 +2,14 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -239,6 +244,8 @@ func TestDefaultRetryCondition(t *testing.T) {
 		{"no response, connection refused", 0, &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, true},
 		{"no response, host unreachable", 0, &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, false},
 		{"no response, no error", 0, nil, false},
+		{"no response, certificate verification failed", 0, fmt.Errorf("wrapped: %w", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), false},
+		{"no response, server does not speak TLS", 0, fmt.Errorf("wrapped: %w", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}), false},
 	}
 
 	for _, tt := range tests {
@@ -257,5 +264,31 @@ func TestDefaultRetryPolicy_NilResponse(t *testing.T) {
 
 	if DefaultRetryPolicy(nil, nil) {
 		t.Error("expected false for nil response without error")
+	}
+}
+
+func TestClient_UntrustedCertificateNotRetried(t *testing.T) {
+	t.Parallel()
+
+	var count atomic.Int32
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		count.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// The test server's certificate is not trusted by the default TLS configuration.
+	c := New(server.URL, WithRetryCount(3), WithRetryBackoff(100*time.Millisecond, 100*time.Millisecond))
+
+	started := time.Now()
+	err := c.Connect(t.Context())
+
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
+		t.Fatalf("expected a certificate verification error, got %v", err)
+	}
+
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Errorf("expected no retry, took %v", elapsed)
 	}
 }

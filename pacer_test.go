@@ -238,6 +238,94 @@ func TestPacer_ErrorWithoutHeadersRefunds(t *testing.T) {
 	}
 }
 
+func TestPacer_TooManyRequestsWithoutRetryAfterRefunds(t *testing.T) {
+	t.Parallel()
+
+	p := learnedPacer(t, newFakeClock(), 3)
+
+	counts := map[string]int{"a": 3}
+	_, _, res := p.reserve(counts)
+	p.sent(res)
+	p.update(counts, res, rateLimitResponse(http.StatusTooManyRequests, "Ratelimit-Limit", "10"))
+
+	if wait, _, _ := p.reserve(counts); wait != 0 {
+		t.Errorf("expected refund after 429 without Retry-After, got wait %v", wait)
+	}
+}
+
+func TestPacer_SuccessWithoutRemainingRefunds(t *testing.T) {
+	t.Parallel()
+
+	// All alerts ignored (204), or the API's rate limiter failed open: no tokens taken, no RateLimit-* headers.
+	for _, status := range []int{http.StatusNoContent, http.StatusAccepted} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+
+			p := learnedPacer(t, newFakeClock(), 3)
+
+			counts := map[string]int{"a": 3}
+			_, _, res := p.reserve(counts)
+			p.sent(res)
+			p.update(counts, res, rateLimitResponse(status))
+
+			if wait, _, _ := p.reserve(counts); wait != 0 {
+				t.Errorf("expected refund after %d without RateLimit-Remaining, got wait %v", status, wait)
+			}
+		})
+	}
+}
+
+func TestPacer_MultipleTargetsResyncToRemaining(t *testing.T) {
+	t.Parallel()
+
+	clock := newFakeClock()
+	p := learnedPacer(t, clock, 10)
+
+	// a and b have 2 tokens left each.
+	counts := map[string]int{"a": 8, "b": 8}
+	_, _, res := p.reserve(counts)
+	p.sent(res)
+
+	// The API ignored most alerts, and its most constrained channel has 7 tokens left: both targets have at
+	// least 7.
+	p.update(counts, res, rateLimitResponse(http.StatusAccepted, "Ratelimit-Limit", "10", "Ratelimit-Remaining", "7"))
+
+	if wait, _, _ := p.reserve(map[string]int{"a": 7, "b": 7}); wait != 0 {
+		t.Errorf("expected tokens of ignored alerts back, got wait %v", wait)
+	}
+
+	// A lower RateLimit-Remaining does not take tokens: other targets may have more.
+	_, _, res = p.reserve(map[string]int{"c": 5})
+	p.sent(res)
+	p.update(map[string]int{"c": 5, "d": 1}, res, rateLimitResponse(http.StatusAccepted, "Ratelimit-Limit", "10", "Ratelimit-Remaining", "0"))
+
+	if wait, _, _ := p.reserve(map[string]int{"c": 5}); wait != 0 {
+		t.Errorf("expected c to keep its tokens, got wait %v", wait)
+	}
+}
+
+func TestPacer_UpdateDeactivatesReservation(t *testing.T) {
+	t.Parallel()
+
+	p := learnedPacer(t, newFakeClock(), 3)
+
+	counts := map[string]int{"a": 3}
+	_, _, res := p.reserve(counts)
+	p.sent(res)
+	p.update(counts, res, rateLimitResponse(http.StatusAccepted, "Ratelimit-Limit", "10", "Ratelimit-Remaining", "0"))
+
+	if res.active {
+		t.Error("expected the reservation to be inactive after update")
+	}
+
+	// A later cancel must not return the tokens the API took.
+	p.cancel(res)
+
+	if wait, _, _ := p.reserve(counts); wait == 0 {
+		t.Error("expected a wait, as the API took the tokens")
+	}
+}
+
 func TestPacer_NoResponseRefunds(t *testing.T) {
 	t.Parallel()
 
@@ -550,13 +638,57 @@ func TestClient_PacingCancelledWhileWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	time.AfterFunc(50*time.Millisecond, cancel)
 
-	err := c.Send(ctx, &types.Alert{SlackChannelID: "C1"})
+	meta, err := c.SendWithResponse(ctx, &types.Alert{SlackChannelID: "C1"})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 
+	if meta != nil {
+		t.Errorf("expected nil metadata when no attempt was sent, got %+v", meta)
+	}
+
 	if b.accepted.Load()+b.rejected.Load() != 1 {
 		t.Errorf("expected the cancelled request not to be sent, got %d requests", b.accepted.Load()+b.rejected.Load())
+	}
+}
+
+func TestClient_PacingIgnoredAlertsDoNotDelay(t *testing.T) {
+	t.Parallel()
+
+	var ignored atomic.Bool
+
+	b := &bucketServer{burst: 2, rate: 0.01, tokens: 2, at: time.Now()}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ignored.Load() && r.URL.Path != "/ping" {
+			// Like the API when all alerts of a request are ignored: no tokens taken, no RateLimit-* headers.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		b.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	c := connectedClient(t, server.URL)
+
+	// Learn the limits, leaving 1 token, then send alerts that the API ignores. Without the refund, the first
+	// would take the last token, and the next send would need a wait of 100s and not be sent.
+	if err := c.Send(t.Context(), &types.Alert{SlackChannelID: "C1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ignored.Store(true)
+
+	for range 3 {
+		if err := c.Send(t.Context(), &types.Alert{SlackChannelID: "C1"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	ignored.Store(false)
+
+	if err := c.Send(t.Context(), &types.Alert{SlackChannelID: "C1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

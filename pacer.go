@@ -24,12 +24,16 @@ var (
 // API would certainly reject with 429, instead of sending them and retrying.
 //
 // The bucket size (burst) and refill rate are learned from the RateLimit-Limit and RateLimit-Policy response
-// headers, and each bucket is resynced from RateLimit-Remaining (or Retry-After on 429) after every response, so
-// the API stays authoritative. Until the limits are known, and for targets without a bucket, the pacer assumes
-// full buckets, i.e. it never delays requests it has no information about.
+// headers, and the buckets of a request's targets are resynced from RateLimit-Remaining (or Retry-After on 429)
+// after every response, so the API stays authoritative. Until the limits are known, and for targets without a
+// bucket, the pacer assumes full buckets, i.e. it never delays requests it has no information about.
 //
-// Other senders to the same channel only drain tokens, so the local estimate is an upper bound: the pacer delays
-// requests that would be rejected, not requests that would succeed.
+// Whenever it is unsure, the pacer errs on the optimistic side (more tokens): other senders to the same channel
+// only drain tokens, attempts without a response give their tokens back, and so do alerts the API ignores. So it
+// delays requests that would be rejected, and with rare exceptions not requests that would succeed: the tokens
+// of alerts the API ignored in a request with several targets are only returned up to RateLimit-Remaining of the
+// most constrained channel, and a request that started waiting behind a reservation that is cancelled later keeps
+// waiting as long as computed.
 type pacer struct {
 	mu        sync.Mutex
 	now       func() time.Time
@@ -161,7 +165,8 @@ func (p *pacer) cancel(r *reservation) {
 	p.refund(r)
 }
 
-// update learns the limits from the response headers and resyncs the buckets of the targets in counts.
+// update learns the limits from the response headers and resyncs the buckets of the targets in counts. The
+// tokens of the reservation are no longer active afterwards.
 //
 // Without a response (a transport error), the tokens of the reservation are returned. The request may have been
 // processed (e.g. on a timeout), but usually it was not (e.g. connection refused while the API restarts), and
@@ -175,6 +180,8 @@ func (p *pacer) update(counts map[string]int, r *reservation, response *resty.Re
 		p.refund(r)
 		return
 	}
+
+	defer p.deactivate(r)
 
 	now := p.now()
 	header := response.Header()
@@ -214,17 +221,31 @@ func (p *pacer) update(counts map[string]int, r *reservation, response *resty.Re
 			b := p.bucket(key, now)
 			b.tokens = min(b.tokens, float64(count)-wait.Seconds()*p.rate)
 		}
-	case hasRemaining && len(counts) == 1:
+	case !hasRemaining:
+		// The API took no tokens: the request was rejected before the rate limit check, all its alerts were
+		// ignored (204), or the API's rate limiter failed open.
+		p.refund(r)
+	case len(counts) == 1:
 		// Exact state of the single target, less the tokens reserved by requests that are still waiting.
-		// RateLimit-Remaining is rounded down, so this errs on the safe side.
+		// RateLimit-Remaining is rounded down, so this errs on the safe side. It also returns the tokens of
+		// alerts the API ignored, as they take no tokens.
 		for key := range counts {
 			p.buckets[key] = &bucket{tokens: float64(remaining - p.waiting[key]), at: now}
 		}
-	case !response.IsSuccess() && !hasRemaining:
-		// Rejected before the rate limit check took any tokens.
-		p.refund(r)
+	default:
+		// RateLimit-Remaining is that of the most constrained channel of the request, so every target has at
+		// least that many tokens. This returns tokens the client took for alerts the API ignored. If all
+		// alerts of a target were ignored, the API did not check its channel, and this is optimistic.
+		for key := range counts {
+			b := p.bucket(key, now)
+			b.tokens = max(b.tokens, float64(remaining-p.waiting[key]))
+		}
 	}
+}
 
+// deactivate marks the tokens of a reservation as no longer held, without returning them. Must be called with
+// p.mu held.
+func (p *pacer) deactivate(r *reservation) {
 	if r != nil {
 		r.active = false
 	}
