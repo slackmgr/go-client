@@ -23,7 +23,7 @@ import (
 // When pacing is enabled and targets is non-nil, each attempt first waits until the client's model of the API's
 // rate limiter (see [pacer]) has tokens for all targets. If that wait exceeds maxRateLimitWait or the context
 // deadline, the request is not sent and an [*APIError] with status 429 and [APIError.NotSent] is returned.
-func (c *Client) execute(ctx context.Context, method, path string, body []byte, targets map[string]int) (*resty.Response, int, error) {
+func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte, targets map[string]int) (*resty.Response, int, error) {
 	var lastResponse *resty.Response
 
 	for attempt := 1; ; attempt++ {
@@ -32,7 +32,7 @@ func (c *Client) execute(ctx context.Context, method, path string, body []byte, 
 			return lastResponse, attempt - 1, err
 		}
 
-		request := c.client.R().SetContext(ctx)
+		request := client.R().SetContext(ctx)
 		if body != nil {
 			request.SetBody(body)
 		}

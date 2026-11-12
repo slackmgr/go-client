@@ -162,13 +162,19 @@ func (p *pacer) cancel(r *reservation) {
 }
 
 // update learns the limits from the response headers and resyncs the buckets of the targets in counts.
+//
+// Without a response (a transport error), the tokens of the reservation are returned. The request may have been
+// processed (e.g. on a timeout), but usually it was not (e.g. connection refused while the API restarts), and
+// keeping the tokens would delay every retry by the time to refill them. Returning them errs on the optimistic
+// side, as the pacer always does: the API corrects the estimate with its next response.
 func (p *pacer) update(counts map[string]int, r *reservation, response *resty.Response) {
-	if response == nil || response.RawResponse == nil {
-		return // No response; the request may have been processed, so keep the reservation.
-	}
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if response == nil || response.RawResponse == nil {
+		p.refund(r)
+		return
+	}
 
 	now := p.now()
 	header := response.Header()

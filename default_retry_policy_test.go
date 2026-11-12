@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 )
@@ -24,10 +25,30 @@ func TestDefaultRetryPolicy_ContextCanceled(t *testing.T) {
 func TestDefaultRetryPolicy_ContextDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 
-	result := DefaultRetryPolicy(nil, context.DeadlineExceeded)
+	// The client stops before calling the retry condition when the context of the send is done, so deadline
+	// exceeded can only come from the request timeout of a single attempt, which is retried.
+	if !DefaultRetryPolicy(nil, context.DeadlineExceeded) {
+		t.Error("expected true for context.DeadlineExceeded")
+	}
+}
 
-	if result {
-		t.Error("expected false for context.DeadlineExceeded")
+func TestDefaultRetryCondition_RequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	_, err := resty.New().SetTimeout(50 * time.Millisecond).R().Get(server.URL)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+
+	if !DefaultRetryCondition(0, err) {
+		t.Errorf("expected request timeout to be retried, got false for %v", err)
 	}
 }
 

@@ -29,16 +29,21 @@ var permanentConnErrors = []syscall.Errno{ //nolint:gochecknoglobals
 // DefaultRetryCondition is the default retry condition used by [Client] (see
 // [WithRetryCondition]). It retries on HTTP 429 (rate limit), 5xx server
 // errors and transient connection errors, including connection refused (as
-// while the API restarts). It does not retry on context cancellation,
-// deadline exceeded, DNS resolution failures, or permanent connection
-// failures (network/host unreachable, permission denied).
+// while the API restarts) and attempts that exceed [WithTimeout]. It does not
+// retry on context cancellation, DNS resolution failures, or permanent
+// connection failures (network/host unreachable, permission denied).
+//
+// The client never retries once the context of the send is done (cancelled or
+// past its deadline), regardless of the retry condition.
 //
 // statusCode is the HTTP status code of the response, or 0 if no response was
 // received. Call it from a custom condition to extend the default behaviour.
 func DefaultRetryCondition(statusCode int, err error) bool {
 	if err != nil {
-		// Don't retry on context cancellation or deadline exceeded
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// Don't retry on context cancellation. Deadline exceeded is not checked: the error of an attempt that
+		// exceeds the request timeout (WithTimeout) matches context.DeadlineExceeded, and is worth retrying. If
+		// the context of the send is past its deadline, the client stops before calling the retry condition.
+		if errors.Is(err, context.Canceled) {
 			return false
 		}
 

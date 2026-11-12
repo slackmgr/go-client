@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `Connect` can be called again after it fails, e.g. once the API is available. Previously, a failed `Connect` returned the same error forever
+- Docs: the `Retry-After` header is honoured for any response that has it, not only 429; `WithRetryBackoff` waits are jittered between 50% and 100% of the backoff; corrected the `ResponseMetadata` and `APIError` docs
+
+### Fixed
+- `DefaultRetryCondition` did not retry attempts that exceeded `WithTimeout`, as their error matches `context.DeadlineExceeded`
+- Rate limit pacing kept the tokens of attempts without a response (e.g. connection refused while the API restarts), so retries were delayed by the time to refill them, or not sent at all
+- After a failed `Connect`, `Send` and `Ping` still sent requests
+- Data race between `Connect` and concurrent `Send`, `Ping`, `Close` or `RestyClient` calls
+
 ## [0.5.0] - 2026-11-12
 
 ### Added

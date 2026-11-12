@@ -88,7 +88,7 @@ Follows [Semantic Versioning](https://semver.org/):
 **Core Components:**
 - `Client` - Main client wrapping resty.Client with Connect/Send methods
 - `Options` - Functional options pattern for configuration (retries, auth, logging)
-- `DefaultRetryCondition` - Retry condition that handles 429/5xx, skips DNS and context errors (`DefaultRetryPolicy`, `WithRetryPolicy`, `WithRetryWaitTime` and `WithRetryMaxWaitTime` are deprecated; successors are `DefaultRetryCondition`, `WithRetryCondition` and `WithRetryBackoff`)
+- `DefaultRetryCondition` - Retry condition that handles 429/5xx, connection errors and attempt timeouts; skips DNS errors, permanent connection errors and cancellation (`DefaultRetryPolicy`, `WithRetryPolicy`, `WithRetryWaitTime` and `WithRetryMaxWaitTime` are deprecated; successors are `DefaultRetryCondition`, `WithRetryCondition` and `WithRetryBackoff`)
 - `retry.go` - Client-side retry loop (resty retries are not used): honours `Retry-After` uncapped up to `maxRateLimitWait`, otherwise jittered exponential backoff; gives up early when the wait exceeds the max or the context deadline
 - `APIError` / `ErrRateLimited` - Typed error for non-2xx responses
 - `pacer.go` - Client-side model of the API's per-channel token buckets (learned from `RateLimit-Policy`/`RateLimit-*` headers, resynced on every response); `execute` waits on it before each attempt (`WithRateLimitPacing`, default on)

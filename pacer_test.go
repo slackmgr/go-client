@@ -238,19 +238,25 @@ func TestPacer_ErrorWithoutHeadersRefunds(t *testing.T) {
 	}
 }
 
-func TestPacer_NoResponseKeepsReservation(t *testing.T) {
+func TestPacer_NoResponseRefunds(t *testing.T) {
 	t.Parallel()
 
-	p := learnedPacer(t, newFakeClock(), 3)
+	for name, response := range map[string]*resty.Response{"nil response": nil, "no raw response": {}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	counts := map[string]int{"a": 3}
-	_, _, res := p.reserve(counts)
-	p.sent(res)
-	p.update(counts, res, nil)
-	p.update(counts, res, &resty.Response{})
+			p := learnedPacer(t, newFakeClock(), 3)
 
-	if wait, _, _ := p.reserve(map[string]int{"a": 1}); wait != time.Second {
-		t.Errorf("expected reservation kept, got wait %v", wait)
+			counts := map[string]int{"a": 3}
+			_, _, res := p.reserve(counts)
+			p.sent(res)
+			p.update(counts, res, response)
+
+			// A retry of the same request is not delayed by the tokens of the attempt without a response.
+			if wait, _, _ := p.reserve(counts); wait != 0 {
+				t.Errorf("expected refund without a response, got wait %v", wait)
+			}
+		})
 	}
 }
 

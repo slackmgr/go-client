@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -18,14 +19,19 @@ import (
 // Client is an HTTP client for sending alerts to the Slack Manager API.
 // Use [New] to create a Client, then call [Client.Connect] to establish
 // the connection. Call [Client.Close] when finished to release resources.
+// All methods are safe for concurrent use.
 type Client struct {
-	baseURL    string
-	client     *resty.Client
-	options    *Options
-	once       sync.Once
-	connectErr error
-	transport  *http.Transport
-	pacer      *pacer
+	baseURL   string
+	options   *Options
+	connectMu sync.Mutex                 // serializes Connect
+	conn      atomic.Pointer[connection] // set when Connect succeeds
+	pacer     *pacer
+}
+
+// connection is the HTTP client of a connected [Client].
+type connection struct {
+	client    *resty.Client
+	transport *http.Transport
 }
 
 type alertsList struct {
@@ -66,55 +72,36 @@ func New(baseURL string, opts ...Option) *Client {
 }
 
 // Connect initializes the HTTP client and validates connectivity by pinging
-// the API. It is safe for concurrent use and only initializes once — if
-// Connect fails, subsequent calls return the same error.
+// the API (with retries, see [WithRetryCount]). It is safe for concurrent use.
+// Once Connect has succeeded, further calls return nil without doing anything.
+// If it fails, the client stays unconnected and Connect can be called again,
+// e.g. after the API has become available.
 func (c *Client) Connect(ctx context.Context) error {
-	c.once.Do(func() {
-		if c.baseURL == "" {
-			c.connectErr = errors.New("base URL must be set")
-			return
-		}
+	c.connectMu.Lock()
+	defer c.connectMu.Unlock()
 
-		if err := c.options.Validate(); err != nil {
-			c.connectErr = fmt.Errorf("invalid options: %w", err)
-			return
-		}
+	if c.conn.Load() != nil {
+		return nil
+	}
 
-		// Configure transport with connection pool settings
-		c.transport = &http.Transport{
-			MaxIdleConns:      c.options.maxIdleConns,
-			MaxConnsPerHost:   c.options.maxConnsPerHost,
-			IdleConnTimeout:   c.options.idleConnTimeout,
-			DisableKeepAlives: c.options.disableKeepAlive,
-			TLSClientConfig:   c.options.tlsConfig,
-		}
+	if c.baseURL == "" {
+		return errors.New("base URL must be set")
+	}
 
-		c.client = resty.New().
-			SetBaseURL(c.baseURL).
-			SetTimeout(c.options.timeout).
-			SetTransport(c.transport).
-			SetRedirectPolicy(resty.FlexibleRedirectPolicy(c.options.maxRedirects)).
-			SetLogger(c.options.requestLogger).
-			SetHeader("User-Agent", c.options.userAgent)
+	if err := c.options.Validate(); err != nil {
+		return fmt.Errorf("invalid options: %w", err)
+	}
 
-		for key, value := range c.options.requestHeaders {
-			c.client.SetHeader(key, value)
-		}
+	conn := c.newConnection()
 
-		if c.options.basicAuthUsername != "" {
-			c.client.SetBasicAuth(c.options.basicAuthUsername, c.options.basicAuthPassword)
-		} else if c.options.authToken != "" {
-			c.client.SetAuthScheme(c.options.authScheme)
-			c.client.SetAuthToken(c.options.authToken)
-		}
+	if err := c.ping(ctx, conn.client); err != nil {
+		conn.transport.CloseIdleConnections()
+		return fmt.Errorf("failed to ping alerts API: %w", err)
+	}
 
-		if err := c.ping(ctx); err != nil {
-			c.connectErr = fmt.Errorf("failed to ping alerts API: %w", err)
-			return
-		}
-	})
+	c.conn.Store(conn)
 
-	return c.connectErr
+	return nil
 }
 
 // Send posts one or more alerts to the API. [Client.Connect] must be called
@@ -126,17 +113,20 @@ func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
 
 // SendWithResponse posts one or more alerts to the API and returns HTTP response metadata.
 // [Client.Connect] must be called first. Returns an error if the alerts slice is empty or
-// any element is nil. The returned *ResponseMetadata is non-nil whenever an HTTP response
-// was received (even on non-2xx); it is nil when a network-level error prevents any
-// response from arriving, or when client-side rate limit pacing ([WithRateLimitPacing])
-// stopped the first attempt from being sent. After retries, it describes the last
-// response received.
+// any element is nil.
+//
+// The returned *ResponseMetadata describes the response to the last attempt, even on
+// non-2xx. It is nil when the last attempt got no response (a network-level error), or
+// when client-side rate limit pacing ([WithRateLimitPacing]) stopped the first attempt
+// from being sent. When pacing stops a retry from being sent, it describes the response
+// to the previous attempt.
 func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (*ResponseMetadata, error) {
 	if c == nil {
 		return nil, errors.New("alert client is nil")
 	}
 
-	if c.client == nil {
+	conn := c.conn.Load()
+	if conn == nil {
 		return nil, errors.New("client not connected - call Connect() first")
 	}
 
@@ -171,7 +161,7 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 		defer cancel()
 	}
 
-	return c.postWithResponse(ctx, c.options.alertsEndpoint, body, targets)
+	return c.postWithResponse(ctx, conn.client, c.options.alertsEndpoint, body, targets)
 }
 
 // SendAlert posts a single alert to the API. It is equivalent to [Client.Send] with one alert.
@@ -191,8 +181,8 @@ func (c *Client) SendAlerts(ctx context.Context, alerts []*types.Alert) error {
 // Close releases idle connections held by the client. After Close is called
 // the client should not be reused.
 func (c *Client) Close() {
-	if c.transport != nil {
-		c.transport.CloseIdleConnections()
+	if conn := c.conn.Load(); conn != nil {
+		conn.transport.CloseIdleConnections()
 	}
 }
 
@@ -204,28 +194,66 @@ func (c *Client) Ping(ctx context.Context) error {
 		return errors.New("alert client is nil")
 	}
 
-	if c.client == nil {
+	conn := c.conn.Load()
+	if conn == nil {
 		return errors.New("client not connected - call Connect() first")
 	}
 
-	return c.ping(ctx)
+	return c.ping(ctx, conn.client)
 }
 
 // RestyClient returns the underlying resty.Client for advanced configuration.
-// Returns nil if [Client.Connect] has not been called. Use with caution:
+// Returns nil until [Client.Connect] has succeeded. Use with caution:
 // direct modifications may affect client behaviour. Retries are handled by
 // [Client], not resty, so requests made directly on the resty client are not
 // retried.
 func (c *Client) RestyClient() *resty.Client {
-	return c.client
+	if conn := c.conn.Load(); conn != nil {
+		return conn.client
+	}
+
+	return nil
 }
 
-func (c *Client) ping(ctx context.Context) error {
-	return c.get(ctx, c.options.pingEndpoint)
+// newConnection creates the HTTP client from the options.
+func (c *Client) newConnection() *connection {
+	// Configure transport with connection pool settings
+	transport := &http.Transport{
+		MaxIdleConns:      c.options.maxIdleConns,
+		MaxConnsPerHost:   c.options.maxConnsPerHost,
+		IdleConnTimeout:   c.options.idleConnTimeout,
+		DisableKeepAlives: c.options.disableKeepAlive,
+		TLSClientConfig:   c.options.tlsConfig,
+	}
+
+	client := resty.New().
+		SetBaseURL(c.baseURL).
+		SetTimeout(c.options.timeout).
+		SetTransport(transport).
+		SetRedirectPolicy(resty.FlexibleRedirectPolicy(c.options.maxRedirects)).
+		SetLogger(c.options.requestLogger).
+		SetHeader("User-Agent", c.options.userAgent)
+
+	for key, value := range c.options.requestHeaders {
+		client.SetHeader(key, value)
+	}
+
+	if c.options.basicAuthUsername != "" {
+		client.SetBasicAuth(c.options.basicAuthUsername, c.options.basicAuthPassword)
+	} else if c.options.authToken != "" {
+		client.SetAuthScheme(c.options.authScheme)
+		client.SetAuthToken(c.options.authToken)
+	}
+
+	return &connection{client: client, transport: transport}
 }
 
-func (c *Client) get(ctx context.Context, path string) error {
-	response, attempts, err := c.execute(ctx, http.MethodGet, path, nil, nil)
+func (c *Client) ping(ctx context.Context, client *resty.Client) error {
+	return c.get(ctx, client, c.options.pingEndpoint)
+}
+
+func (c *Client) get(ctx context.Context, client *resty.Client, path string) error {
+	response, attempts, err := c.execute(ctx, client, http.MethodGet, path, nil, nil)
 	if err != nil {
 		return fmt.Errorf("GET %s failed: %w", path, err)
 	}
@@ -237,8 +265,8 @@ func (c *Client) get(ctx context.Context, path string) error {
 	return nil
 }
 
-func (c *Client) postWithResponse(ctx context.Context, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
-	response, attempts, err := c.execute(ctx, http.MethodPost, path, body, targets)
+func (c *Client) postWithResponse(ctx context.Context, client *resty.Client, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
+	response, attempts, err := c.execute(ctx, client, http.MethodPost, path, body, targets)
 
 	if _, ok := errors.AsType[*APIError](err); ok {
 		return responseMetadata(response), err

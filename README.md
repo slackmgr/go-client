@@ -61,7 +61,7 @@ if err != nil {
 log.Printf("sent: status=%d duration=%v", meta.StatusCode, meta.Duration)
 ```
 
-`*ResponseMetadata` is non-nil whenever an HTTP response was received, even on non-2xx status codes. It is `nil` only when a network-level error prevents any response from arriving. This lets callers distinguish transport failures from server-reported errors.
+`*ResponseMetadata` describes the response to the last attempt, even on non-2xx status codes. It is `nil` when the last attempt got no response (a network-level error), or when rate limit pacing did not send the first attempt. This lets callers distinguish transport failures from server-reported errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -69,7 +69,7 @@ log.Printf("sent: status=%d duration=%v", meta.StatusCode, meta.Duration)
 | `Duration` | `time.Duration` | Round-trip time for the request |
 | `Headers` | `map[string]string` | Response headers; multi-value headers joined with `", "` |
 
-`Connect` validates configuration, initializes the connection pool, and pings the API. It is safe for concurrent use and will only initialize once — if it fails, subsequent calls return the same error. Call `Close` when finished to release idle connections.
+`Connect` validates configuration, initializes the connection pool, and pings the API (with retries). It is safe for concurrent use. Once it has succeeded, further calls do nothing. If it fails, the client stays unconnected (`Send` and `Ping` return an error) and `Connect` can be called again. Call `Close` when finished to release idle connections.
 
 ## Migrating from the legacy client library
 
@@ -91,16 +91,16 @@ All options are provided via `With*` constructor functions.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `WithRetryCount(int)` | `3` | Maximum retries after the first attempt, for failures accepted by the retry condition (max 100, 0 disables) |
-| `WithRetryCondition(func(statusCode int, err error) bool)` | `DefaultRetryCondition` | Decides whether a failed attempt is retried (default: 429, 5xx, transient connection errors). `statusCode` is 0 when no response was received |
-| `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries of 5xx and connection errors: starts at `initial`, doubles per retry up to `max` (initial 100ms–1min, max 100ms–5min). Not used for 429 |
-| `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest wait because of the rate limit: a 429's `Retry-After`, or client-side pacing (1s–10min). Longer waits return the 429 error right away |
+| `WithRetryCondition(func(statusCode int, err error) bool)` | `DefaultRetryCondition` | Decides whether a failed attempt is retried (default: 429, 5xx, transient connection errors, timed out attempts). `statusCode` is 0 when no response was received |
+| `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries of 5xx and connection errors: starts at `initial`, doubles per retry up to `max`, each wait a random 50–100% of the backoff (initial 100ms–1min, max 100ms–5min). Not used for responses with `Retry-After`, such as 429 |
+| `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest wait because of the rate limit: a response's `Retry-After`, or client-side pacing (1s–10min). Longer waits return the error right away |
 | `WithRateLimitPacing(bool)` | `true` | Pace alerts client-side against the API's per-channel rate limit (see below) |
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
 | `WithAuthToken(string)` | — | Token for `Authorization` header (mutually exclusive with `WithBasicAuth`) |
 | `WithAuthScheme(string)` | `"Bearer"` | Authentication scheme used with `WithAuthToken` |
 | `WithBasicAuth(username, password string)` | — | HTTP Basic authentication (mutually exclusive with `WithAuthToken`) |
-| `WithTimeout(time.Duration)` | `30s` | Timeout of a single HTTP request, i.e. one attempt (1s–5min) |
+| `WithTimeout(time.Duration)` | `30s` | Timeout of a single HTTP request, i.e. one attempt (1s–5min). A timed out attempt is retried |
 | `WithSendTimeout(time.Duration)` | `2m` | Maximum total time of `Send`/`SendWithResponse`, including retries and waits, when the context has no deadline (0 disables, 1s–1h). A context deadline takes precedence |
 | `WithUserAgent(string)` | `"slack-manager-go-client/<version>"` | `User-Agent` header value. The default uses the module version from the build info (`dev` if unknown) |
 | `WithMaxIdleConns(int)` | `100` | Maximum idle connections across all hosts |
@@ -115,7 +115,7 @@ All options are provided via `With*` constructor functions.
 
 ### Retry behaviour
 
-`DefaultRetryCondition` retries on HTTP 429 (rate limit), 5xx server errors, and transient connection errors, including connection refused (as while the API restarts or is redeployed). It does **not** retry on context cancellation, deadline exceeded, DNS resolution failures, or unreachable networks/hosts.
+`DefaultRetryCondition` retries on HTTP 429 (rate limit), 5xx server errors, transient connection errors, including connection refused (as while the API restarts or is redeployed), and attempts that exceed `WithTimeout`. It does **not** retry on context cancellation, DNS resolution failures, unreachable networks/hosts, or permission denied. The client never retries once the context of the send is done (cancelled or past its deadline).
 
 The total time of a send, including retries and waits, is limited by the context deadline, or `WithSendTimeout` (default 2 minutes) when the context has none. The defaults need no tuning: the client follows the status codes and `Retry-After`/`RateLimit-*` headers of the API.
 
@@ -129,8 +129,8 @@ client.WithRetryCondition(func(statusCode int, err error) bool {
 
 Wait between attempts:
 
-- **429**: the API always sends `Retry-After`, and the client waits exactly that long. `WithMaxRateLimitWait` limits this wait
-- **5xx and connection errors**: exponential backoff with jitter (`WithRetryBackoff`)
+- **Responses with `Retry-After`** (the API always sends it with 429): the client waits exactly that long. `WithMaxRateLimitWait` limits this wait
+- **Other 5xx responses and connection errors**: exponential backoff with jitter (`WithRetryBackoff`)
 
 The client stops retrying early, returning the last error, when the `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline, since the retry could not succeed anyway.
 
@@ -155,6 +155,7 @@ The API limits alerts per Slack channel with a token bucket. By default, the cli
 - Before sending, the client waits until all targets of the request have enough tokens. Concurrent senders reserve tokens in turn, so they queue up instead of waking up together
 - If the wait exceeds `WithMaxRateLimitWait` or the context deadline, the request is not sent, and an `*APIError` with status 429, `NotSent: true` and the predicted wait in `RetryAfter` is returned
 - Until the limits are known, and for targets without recent alerts, nothing is delayed
+- An attempt that gets no response (e.g. connection refused) gives its tokens back, so retries while the API restarts are not delayed
 
 Other senders only drain tokens, so the client's estimate is an upper bound: it delays requests that would be rejected, not requests that would succeed. Disable with `WithRateLimitPacing(false)`.
 

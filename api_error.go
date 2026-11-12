@@ -12,7 +12,8 @@ import (
 var ErrRateLimited = errors.New("rate limited")
 
 // APIError is returned by [Client.Send], [Client.SendWithResponse] and [Client.Ping] (and wrapped by
-// [Client.Connect]) when the API responds with a non-2xx status code, after any retries.
+// [Client.Connect]) when the API responds with a non-2xx status code, after any retries. It is also returned,
+// with status 429 and [APIError.NotSent] set, when client-side rate limit pacing does not send a request.
 type APIError struct {
 	// Method is the HTTP method of the failed request.
 	Method string

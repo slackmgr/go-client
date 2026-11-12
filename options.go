@@ -121,10 +121,12 @@ func WithRetryCount(count int) Option {
 }
 
 // WithRetryBackoff sets the backoff between retries of 5xx responses and
-// connection errors: the first retry waits initial, and the wait doubles with
-// each retry, with jitter, up to maxWait. It does not apply to 429 responses,
-// which the API always sends with a Retry-After header (see
-// [WithMaxRateLimitWait]). The default is 500ms initial and 3s max.
+// connection errors: the backoff starts at initial and doubles with each
+// retry, up to maxWait, and each wait is a random duration between half and
+// all of the backoff (jitter). It does not apply to responses with a
+// Retry-After header, such as the API's 429 responses, which wait for the
+// header instead (see [WithMaxRateLimitWait]). The default is 500ms initial
+// and 3s max.
 //
 // initial must be 100ms–1 minute, and maxWait 100ms–5 minutes and at least
 // initial; this is validated by [Client.Connect].
@@ -162,15 +164,16 @@ func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 // WithMaxRateLimitWait sets the longest the client waits because of the
 // API's rate limit, in two places:
 //
-//   - Before retrying a 429 response: the client waits exactly the time in
-//     its Retry-After header.
+//   - Before retrying a response with a Retry-After header, such as the API's
+//     429 responses: the client waits exactly the time in the header.
 //   - Before sending, when client-side pacing ([WithRateLimitPacing]) predicts
 //     a 429.
 //
 // If the wait would be longer than this, or past the context deadline, the
-// client returns an [*APIError] with status 429 right away, instead of a
-// request or retry that could not succeed. [APIError.RetryAfter] tells when
-// to try again, and [APIError.NotSent] whether the last request was sent.
+// client returns an [*APIError] right away (status 429, or the status of the
+// response with the Retry-After header), instead of a request or retry that
+// could not succeed. [APIError.RetryAfter] tells when to try again, and
+// [APIError.NotSent] whether the last request was sent.
 //
 // The default is 1 minute. Valid range is 1s–10 minutes; values outside it
 // are silently ignored. Retries of 429 responses count against
@@ -225,8 +228,8 @@ func WithRequestLogger(logger RequestLogger) Option {
 // extend the default behaviour.
 //
 // The condition only decides whether to retry. The wait is the Retry-After
-// header for 429 responses ([WithMaxRateLimitWait]), and backoff otherwise
-// ([WithRetryBackoff]).
+// header when the response has one, such as the API's 429 responses
+// ([WithMaxRateLimitWait]), and backoff otherwise ([WithRetryBackoff]).
 //
 // Nil values are silently ignored and the default is retained.
 func WithRetryCondition(condition func(statusCode int, err error) bool) Option {
@@ -305,8 +308,9 @@ func WithAuthToken(token string) Option {
 // default is 30 seconds. Valid range is 1 second–5 minutes. Values outside
 // this range are silently ignored and the default is retained.
 //
-// The total time of a send, including retries and waits, is limited by the
-// context deadline or [WithSendTimeout].
+// An attempt that times out is retried by [DefaultRetryCondition]. The total
+// time of a send, including retries and waits, is limited by the context
+// deadline or [WithSendTimeout].
 func WithTimeout(timeout time.Duration) Option {
 	return func(o *Options) {
 		if timeout >= minTimeout && timeout <= maxTimeout {

@@ -22,19 +22,25 @@
 // # Configuration
 //
 // All configuration is supplied as [Option] functions passed to [New].
-// Invalid values are silently ignored and the default is retained;
-// all configuration is validated when [Client.Connect] is called.
+// Most options silently ignore invalid values and retain the default; see
+// the docs of each option. All configuration is validated when
+// [Client.Connect] is called, which rejects the remaining invalid values
+// (e.g. of [WithRetryBackoff] and [WithAlertClient]).
 //
 // # Retry Behaviour
 //
 // [DefaultRetryCondition] retries on HTTP 429 (rate limit) and 5xx server
-// errors, and on transient connection errors. Context cancellation, deadline
-// exceeded, and DNS resolution errors are never retried. Supply a custom
-// function via [WithRetryCondition] to override this behaviour.
+// errors, on transient connection errors and on attempts that exceed
+// [WithTimeout]. Context cancellation, DNS resolution errors and permanent
+// connection failures (network/host unreachable, permission denied) are not
+// retried, and the client never retries once the context of the send is done.
+// Supply a custom function via [WithRetryCondition] to override this
+// behaviour.
 //
-// Before retrying a 429, the client waits exactly the time in the Retry-After
-// header (up to [WithMaxRateLimitWait]). Retries of 5xx responses and
-// connection errors use exponential backoff with jitter ([WithRetryBackoff]).
+// When a response has a Retry-After header, as the API's 429 responses
+// always do, the client waits exactly that long before retrying (up to
+// [WithMaxRateLimitWait]). Other retries use exponential backoff with jitter
+// ([WithRetryBackoff]).
 // Retrying stops early when the wait exceeds [WithMaxRateLimitWait] or the
 // context deadline. Without a context deadline, a send is limited to
 // [WithSendTimeout] (default 2 minutes).
@@ -47,7 +53,8 @@
 //
 // # Errors
 //
-// Non-2xx responses are returned as [*APIError]. Use [errors.Is] with
+// Non-2xx responses are returned as [*APIError], as are requests that rate
+// limit pacing did not send ([APIError.NotSent]). Use [errors.Is] with
 // [ErrRateLimited] to detect rate limiting, and [APIError.RetryAfter] to
 // decide when to try again.
 //

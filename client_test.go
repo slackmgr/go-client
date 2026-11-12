@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/slackmgr/types"
@@ -566,27 +568,78 @@ func TestSend_JSONFormat(t *testing.T) {
 	}
 }
 
-func TestConnect_ErrorPersistence(t *testing.T) {
+func TestConnect_RetryAfterFailure(t *testing.T) {
 	t.Parallel()
 
-	// Use an invalid URL that will fail to connect
-	client := New("http://localhost:1", WithRetryCount(0))
+	var healthy atomic.Bool
 
-	// First connect should fail
-	err1 := client.Connect(context.Background())
-	if err1 == nil {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !healthy.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, WithRetryCount(0))
+
+	if err := client.Connect(context.Background()); err == nil {
 		t.Fatal("expected first connect to fail")
 	}
 
-	// Second connect should return the same error (not nil)
-	err2 := client.Connect(context.Background())
-	if err2 == nil {
-		t.Fatal("expected second connect to return persisted error, got nil")
+	// A failed connect leaves the client unconnected.
+	if client.RestyClient() != nil {
+		t.Error("expected nil resty client after failed connect")
 	}
 
-	if err1.Error() != err2.Error() {
-		t.Errorf("expected same error on second call, got %v vs %v", err1, err2)
+	if err := client.Send(context.Background(), &types.Alert{}); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Errorf("expected not connected error after failed connect, got %v", err)
 	}
+
+	if err := client.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "not connected") {
+		t.Errorf("expected not connected error from Ping after failed connect, got %v", err)
+	}
+
+	healthy.Store(true)
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("expected second connect to succeed, got %v", err)
+	}
+
+	if err := client.Send(context.Background(), &types.Alert{}); err != nil {
+		t.Errorf("expected send to succeed after connect, got %v", err)
+	}
+}
+
+func TestConnect_ConcurrentWithSend(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(server.URL)
+	defer client.Close()
+
+	var wg sync.WaitGroup
+
+	for range 5 {
+		wg.Go(func() {
+			if err := client.Connect(context.Background()); err != nil {
+				t.Errorf("connect failed: %v", err)
+			}
+		})
+		wg.Go(func() {
+			// Either not connected yet, or sent; the race detector checks the access to the connection.
+			_ = client.Send(context.Background(), &types.Alert{})
+			_ = client.RestyClient()
+		})
+	}
+
+	wg.Wait()
 }
 
 func TestSend_ContextCancellation(t *testing.T) {
