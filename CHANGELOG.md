@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-12
+
 ### Added
 - `APIError`: typed error for non-2xx responses, with status code, message, `Retry-After` wait and number of attempts
 - `ErrRateLimited`: matches an `APIError` with status 429 via `errors.Is`
@@ -20,11 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The retry condition is only called for failed attempts (error or non-2xx response). Previously, as a resty retry condition, it was also called for successful responses
 - Retries are handled by the client instead of resty. Requests made directly on `RestyClient()` are no longer retried
 - The client stops retrying when the requested `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline
-
 - Clarified the docs of `WithRetryCount` and the retry options: backoff only applies to retries of 5xx responses and connection errors, 429 retries wait for `Retry-After`
-
 - Connection refused is now retried by `DefaultRetryCondition`, as it is what clients typically get while the API restarts or is redeployed
 - The default `User-Agent` is `slack-manager-go-client/<module version>` (from the build info, `dev` if unknown), instead of the fixed `slack-manager-go-client/1.0`
+- Lint: check the format strings of `types.Logger` methods
 
 ### Deprecated
 - `WithRetryWaitTime` and `WithRetryMaxWaitTime`: use `WithRetryBackoff`
@@ -204,7 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WithTimeout`, `WithUserAgent`, `WithRequestHeader` options
 - `WithRequestLogger`, `WithRetryPolicy` options
 
-[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/slackmgr/go-client/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/slackmgr/go-client/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/slackmgr/go-client/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/slackmgr/go-client/compare/v0.3.1...v0.3.2
