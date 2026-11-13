@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -19,40 +18,20 @@ import (
 // the wrapped transport error otherwise. When the context is done while waiting for a retry, the error also wraps
 // the context error, so that both [errors.Is] with the context error and [errors.As] with the last error work.
 //
-// The wait between attempts is the Retry-After header value when present (up to maxRateLimitWait), and capped
-// exponential backoff with jitter otherwise. Retrying stops early when the API asks for a longer wait than
-// maxRateLimitWait, or when the wait would exceed the context deadline, as the retry could not succeed anyway.
-//
-// When pacing is enabled and targets is non-nil, each attempt first waits until the client's model of the API's
-// rate limiter (see [pacer]) has tokens for all targets. If that wait exceeds maxRateLimitWait or the context
-// deadline, the request is not sent and an [*APIError] with status 429 and [APIError.NotSent] is returned.
-func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte, targets map[string]int) (*resty.Response, error) {
-	var (
-		lastResponse *resty.Response
-		lastErr      error
-	)
-
+// The wait between attempts is the Retry-After header value when present (up to maxRateLimitWait), plus up to
+// [retryAfterJitter] more, and capped exponential backoff with jitter otherwise. Retrying stops early when the API
+// asks for a longer wait than maxRateLimitWait, or when the wait would exceed the context deadline, as the retry
+// could not succeed anyway.
+func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte) (*resty.Response, error) {
 	for attempt := 1; ; attempt++ {
-		res, err := c.pace(ctx, method, path, targets, attempt)
-		if err != nil {
-			if _, notSent := errors.AsType[*APIError](err); notSent {
-				return lastResponse, err
-			}
-
-			return lastResponse, cancelled(lastErr, err)
-		}
-
 		request := client.R().SetContext(ctx)
 		if body != nil {
 			request.SetBody(body)
 		}
 
 		response, err := request.Execute(method, path)
-		lastResponse = response
 
-		if res != nil {
-			c.pacer.update(targets, res, response)
-		}
+		var lastErr error
 
 		switch {
 		case err != nil:
@@ -69,9 +48,13 @@ func (c *Client) execute(ctx context.Context, client *resty.Client, method, path
 
 		wait, fromHeader := c.retryWait(response, attempt)
 
-		if fromHeader && wait > c.options.maxRateLimitWait {
-			c.options.requestLogger.Warnf("%s %s: not retrying, Retry-After %v exceeds the max wait %v", method, path, wait, c.options.maxRateLimitWait)
-			return response, lastErr
+		if fromHeader {
+			if wait > c.options.maxRateLimitWait {
+				c.options.requestLogger.Warnf("%s %s: not retrying, Retry-After %v exceeds the max wait %v", method, path, wait, c.options.maxRateLimitWait)
+				return response, lastErr
+			}
+
+			wait += jitter(wait)
 		}
 
 		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
@@ -82,60 +65,23 @@ func (c *Client) execute(ctx context.Context, client *resty.Client, method, path
 		c.options.requestLogger.Debugf("%s %s: attempt %d failed, retrying in %v", method, path, attempt, wait)
 
 		if !sleep(ctx, wait) {
-			return response, cancelled(lastErr, ctx.Err())
+			return response, fmt.Errorf("%w (retry cancelled: %w)", lastErr, ctx.Err())
 		}
 	}
 }
 
-// cancelled returns the error of a send whose context was done while waiting for an attempt: ctxErr, wrapped
-// together with the error of the previous attempt, if any.
-func cancelled(lastErr, ctxErr error) error {
-	if lastErr == nil {
-		return ctxErr
+// retryAfterJitter is the largest extra wait added to a Retry-After wait, as a fraction of it. Concurrent requests
+// rejected with the same Retry-After then spread their retries, instead of all retrying at the same moment.
+const retryAfterJitter = 0.2
+
+// jitter returns a random duration between zero and [retryAfterJitter] of wait.
+func jitter(wait time.Duration) time.Duration {
+	limit := time.Duration(float64(wait) * retryAfterJitter)
+	if limit <= 0 {
+		return 0
 	}
 
-	return fmt.Errorf("%w (retry cancelled: %w)", lastErr, ctxErr)
-}
-
-// pace waits until the pacer has tokens for the targets, and marks the returned reservation as sent. It returns
-// nil without waiting when pacing is disabled or targets is nil.
-func (c *Client) pace(ctx context.Context, method, path string, targets map[string]int, attempt int) (*reservation, error) {
-	if c.pacer == nil || targets == nil {
-		return nil, nil //nolint:nilnil // no reservation and no error when not pacing
-	}
-
-	wait, target, res := c.pacer.reserve(targets)
-
-	if wait > 0 {
-		exceedsMax := wait > c.options.maxRateLimitWait
-		deadline, hasDeadline := ctx.Deadline()
-
-		if exceedsMax || (hasDeadline && time.Now().Add(wait).After(deadline)) {
-			c.pacer.cancel(res)
-			c.options.requestLogger.Warnf("%s %s: not sent, client-side rate limit for %s requires a wait of %v", method, path, target, wait)
-
-			return nil, &APIError{
-				Method:     method,
-				URL:        c.requestURL(path),
-				StatusCode: http.StatusTooManyRequests,
-				Message:    fmt.Sprintf("Rate limit exceeded for %s (predicted by the client, request not sent)", target),
-				RetryAfter: wait,
-				Attempts:   attempt - 1,
-				NotSent:    true,
-			}
-		}
-
-		c.options.requestLogger.Debugf("%s %s: pacing, waiting %v for the rate limit of %s", method, path, wait, target)
-
-		if !sleep(ctx, wait) {
-			c.pacer.cancel(res)
-			return nil, ctx.Err()
-		}
-	}
-
-	c.pacer.sent(res)
-
-	return res, nil
+	return rand.N(limit) // #nosec G404 -- retry jitter needs no cryptographic randomness
 }
 
 // retryWait returns the wait before the next attempt, and whether it comes from the Retry-After header.

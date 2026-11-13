@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Client-side rate limit pacing (`WithRateLimitPacing`, `APIError.NotSent`). Its model of the API's rate limiter could not be accurate (other senders, route key mapping, multiple API instances), and since the API accepts or rejects a request as a whole, a 429 is safe to retry. The client now relies on the `Retry-After` header of 429 responses
+
 ### Changed
+- `Retry-After` waits get a random extra of up to 20%, so that concurrent requests rejected together do not all retry at the same moment
 - `WithSendTimeout` also limits `Connect` and `Ping` when the context has no deadline
 - When the context is done while waiting for a retry (backoff, `Retry-After` or rate limit pacing), the error wraps both the error of the previous attempt and the context error, and `SendWithResponse` returns the metadata of the previous response. Previously, a cancelled backoff returned only the previous error, and a cancelled pacing wait only the context error, without metadata
 - `Connect` rejects a base URL that is not an absolute `http` or `https` URL
@@ -18,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DefaultRetryCondition` retried errors that cannot succeed: server certificate verification failures, and a server that does not speak TLS
 - Exceeding `WithMaxRedirects` (including any redirect with `WithMaxRedirects(0)`) returned an error that was retried. The redirect response is now returned as an `APIError` with its 3xx status, which is not retried
 - `WithMaxRedirects(n)` followed only `n-1` redirects
-- Rate limit pacing kept the tokens of alerts the API ignored, delaying later alerts to the same channel, or not sending them at all
 - A huge `Retry-After` value overflowed, so the client retried immediately and `APIError.RetryAfter` was negative. `Retry-After` is now capped at 24 hours
 
 ## [0.5.1] - 2026-11-12

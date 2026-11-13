@@ -54,7 +54,6 @@ type Options struct {
 	retryMaxWaitTime  time.Duration
 	maxRateLimitWait  time.Duration
 	sendTimeout       time.Duration
-	rateLimitPacing   bool
 	requestLogger     RequestLogger
 	retryPolicy       func(*resty.Response, error) bool
 	requestHeaders    map[string]string
@@ -82,7 +81,6 @@ func newClientOptions() *Options {
 		retryMaxWaitTime: 3 * time.Second,
 		maxRateLimitWait: defaultMaxRateLimitWait,
 		sendTimeout:      defaultSendTimeout,
-		rateLimitPacing:  true,
 		requestLogger:    &NoopLogger{},
 		retryPolicy:      retryConditionPolicy(DefaultRetryCondition),
 		requestHeaders: map[string]string{
@@ -106,9 +104,6 @@ func newClientOptions() *Options {
 // A failed attempt is retried when the retry condition ([WithRetryCondition])
 // says so; by default on 429, 5xx and transient connection errors. 0 disables
 // retries. The default is 3.
-//
-// Waits for client-side rate limit pacing ([WithRateLimitPacing]) happen
-// before sending and are not retries.
 //
 // Negative values are silently ignored. Values above 100 are rejected by
 // [Client.Connect].
@@ -162,22 +157,17 @@ func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 	}
 }
 
-// WithMaxRateLimitWait sets the longest the client waits because of the
-// API's rate limit, in two places:
+// WithMaxRateLimitWait sets the longest Retry-After the client waits for
+// before retrying a response with that header, such as the API's 429
+// responses. The client waits the time in the header, plus a random extra of
+// up to 20% so that concurrent requests do not all retry at the same moment.
 //
-//   - Before retrying a response with a Retry-After header, such as the API's
-//     429 responses: the client waits exactly the time in the header.
-//   - Before sending, when client-side pacing ([WithRateLimitPacing]) predicts
-//     a 429.
-//
-// If the wait would be longer than this, the client returns an [*APIError]
-// right away (status 429, or the status of the response with the Retry-After
-// header), instead of a request or retry that could not succeed.
-// [APIError.RetryAfter] tells when to try again, and [APIError.NotSent]
-// whether the last request was sent. The same applies when the wait would
-// pass the context deadline, which also stops backoff waits ([WithRetryBackoff]);
-// then the last error is returned, which is a transport error when the last
-// attempt got no response.
+// If the Retry-After is longer than this, the client returns the [*APIError]
+// of the response right away, instead of a retry that could not succeed.
+// [APIError.RetryAfter] tells when to try again. The same applies when the
+// wait would pass the context deadline, which also stops backoff waits
+// ([WithRetryBackoff]); then the last error is returned, which is a transport
+// error when the last attempt got no response.
 //
 // The default is 1 minute. Valid range is 1s–10 minutes; values outside it
 // are silently ignored. Retries of 429 responses count against
@@ -187,26 +177,6 @@ func WithMaxRateLimitWait(maxWait time.Duration) Option {
 		if maxWait >= minMaxRateLimitWait && maxWait <= maxMaxRateLimitWait {
 			o.maxRateLimitWait = maxWait
 		}
-	}
-}
-
-// WithRateLimitPacing enables or disables client-side pacing of alerts against
-// the API's per-channel rate limit. It is enabled by default.
-//
-// The client learns the limit from the RateLimit-Policy and RateLimit-*
-// response headers and keeps a token bucket per target channel (or route
-// key), resynced from every response. Before sending, it waits until all
-// targets of the request have enough tokens, instead of sending a request
-// the API would reject with 429. If the wait exceeds [WithMaxRateLimitWait]
-// or the context deadline, the request is not sent and an [*APIError] with
-// status 429 and [APIError.NotSent] is returned.
-//
-// Only alerts sent through this client are counted; other senders to the
-// same channel are seen through the API's headers. So the client only
-// delays requests that would be rejected, and the API remains the authority.
-func WithRateLimitPacing(enabled bool) Option {
-	return func(o *Options) {
-		o.rateLimitPacing = enabled
 	}
 }
 

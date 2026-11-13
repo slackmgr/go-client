@@ -81,6 +81,9 @@ func TestRetry_RetryAfterNotCappedByRetryMaxWaitTime(t *testing.T) {
 	// RetryMaxWaitTime is 200ms, but the client must wait the full Retry-After second.
 	if elapsed := time.Since(started); elapsed < time.Second {
 		t.Errorf("expected wait of at least 1s, got %v", elapsed)
+	} else if elapsed > 1500*time.Millisecond {
+		// Retry-After 1s plus at most 20% jitter, with some slack for scheduling.
+		t.Errorf("expected wait of at most 1.2s plus slack, got %v", elapsed)
 	}
 
 	if count.Load() != 2 {
@@ -480,6 +483,44 @@ func TestBackoff(t *testing.T) {
 
 	if got := backoff(0, 0, 1); got != 0 {
 		t.Errorf("expected 0 for zero waits, got %v", got)
+	}
+}
+
+func TestJitter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		wait time.Duration
+	}{
+		{"zero", 0},
+		{"one nanosecond", time.Nanosecond},
+		{"one second", time.Second},
+		{"one minute", time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			limit := time.Duration(float64(tt.wait) * retryAfterJitter)
+
+			for range 100 {
+				if got := jitter(tt.wait); got < 0 || got > limit {
+					t.Fatalf("expected jitter in [0, %v], got %v", limit, got)
+				}
+			}
+		})
+	}
+
+	// The jitter must actually spread the waits.
+	seen := make(map[time.Duration]struct{})
+	for range 20 {
+		seen[jitter(time.Second)] = struct{}{}
+	}
+
+	if len(seen) < 2 {
+		t.Error("expected different jitter values")
 	}
 }
 

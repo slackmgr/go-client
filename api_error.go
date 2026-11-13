@@ -12,9 +12,8 @@ import (
 var ErrRateLimited = errors.New("rate limited")
 
 // APIError is returned by [Client.Send], [Client.SendWithResponse] and [Client.Ping] (and wrapped by
-// [Client.Connect]) when the API responds with a non-2xx status code, after any retries. It is also returned,
-// with status 429 and [APIError.NotSent] set, when client-side rate limit pacing does not send a request. When
-// the context is done while waiting for a retry, it is wrapped together with the context error.
+// [Client.Connect]) when the API responds with a non-2xx status code, after any retries. When the context is
+// done while waiting for a retry, it is wrapped together with the context error.
 type APIError struct {
 	// Method is the HTTP method of the failed request.
 	Method string
@@ -29,17 +28,11 @@ type APIError struct {
 	Message string
 
 	// RetryAfter is the wait time requested by the Retry-After header of the last response, relative to when
-	// it was received (capped at 24 hours), or the predicted wait when [APIError.NotSent] is true. It is zero
-	// when the header is absent or invalid.
+	// it was received (capped at 24 hours). It is zero when the header is absent or invalid.
 	RetryAfter time.Duration
 
 	// Attempts is the number of requests made, including retries.
 	Attempts int
-
-	// NotSent is true when the client did not send the (last) request, because its model of the API's rate
-	// limiter predicted a 429 and the wait exceeded [WithMaxRateLimitWait] or the context deadline. See
-	// [WithRateLimitPacing].
-	NotSent bool
 }
 
 // Error implements the error interface.

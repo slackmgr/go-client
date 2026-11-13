@@ -61,7 +61,7 @@ if err != nil {
 log.Printf("sent: status=%d duration=%v", meta.StatusCode, meta.Duration)
 ```
 
-`*ResponseMetadata` describes the response to the last attempt that was sent, even on non-2xx status codes. It is `nil` when that attempt got no response (a network-level error), or when no attempt was sent (rate limit pacing did not send the first attempt, or the context was done while waiting for it). This lets callers distinguish transport failures from server-reported errors.
+`*ResponseMetadata` describes the response to the last attempt, even on non-2xx status codes. It is `nil` when that attempt got no response (a network-level error). This lets callers distinguish transport failures from server-reported errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -93,8 +93,7 @@ All options are provided via `With*` constructor functions.
 | `WithRetryCount(int)` | `3` | Maximum retries after the first attempt, for failures accepted by the retry condition (max 100, 0 disables) |
 | `WithRetryCondition(func(statusCode int, err error) bool)` | `DefaultRetryCondition` | Decides whether a failed attempt is retried (default: 429, 5xx, transient connection errors, timed out attempts). `statusCode` is 0 when no response was received |
 | `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries without `Retry-After` (5xx, connection errors, anything else the retry condition retries): starts at `initial`, doubles per retry up to `max`, each wait a random 50–100% of the backoff (initial 100ms–1min, max 100ms–5min). Not used for responses with `Retry-After`, such as the API's 429 |
-| `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest wait because of the rate limit: a response's `Retry-After`, or client-side pacing (1s–10min). Longer waits return the error right away |
-| `WithRateLimitPacing(bool)` | `true` | Pace alerts client-side against the API's per-channel rate limit (see below) |
+| `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest `Retry-After` (e.g. of a 429) the client waits for before retrying (1s–10min). Longer waits return the error right away |
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
 | `WithAuthToken(string)` | — | Token for `Authorization` header (mutually exclusive with `WithBasicAuth`) |
@@ -117,7 +116,7 @@ All options are provided via `With*` constructor functions.
 
 `DefaultRetryCondition` retries on HTTP 429 (rate limit), 5xx server errors, transient connection errors, including connection refused (as while the API restarts or is redeployed), and attempts that exceed `WithTimeout`. It does **not** retry on context cancellation, DNS resolution failures, unreachable networks/hosts, permission denied, server certificate verification failures, or a server that does not speak TLS. The client never retries once the context of the send is done (cancelled or past its deadline).
 
-The total time of a send (or `Ping`/`Connect`), including retries and waits, is limited by the context deadline, or `WithSendTimeout` (default 2 minutes) when the context has none. The defaults need no tuning: the client follows the status codes and `Retry-After`/`RateLimit-*` headers of the API.
+The total time of a send (or `Ping`/`Connect`), including retries and waits, is limited by the context deadline, or `WithSendTimeout` (default 2 minutes) when the context has none. The defaults need no tuning: the client follows the status codes and `Retry-After` headers of the API.
 
 Supply a custom function via `WithRetryCondition` to override this behaviour. Call `DefaultRetryCondition` from it to extend the default:
 
@@ -129,7 +128,7 @@ client.WithRetryCondition(func(statusCode int, err error) bool {
 
 Wait between attempts:
 
-- **Responses with `Retry-After`** (the API always sends it with 429): the client waits exactly that long. `WithMaxRateLimitWait` limits this wait
+- **Responses with `Retry-After`** (the API always sends it with 429): the client waits that long, plus a random extra of up to 20%, so that concurrent requests rejected together do not all retry at the same moment. `WithMaxRateLimitWait` limits this wait
 - **Everything else** (5xx and 429 responses without `Retry-After`, connection errors, failures a custom condition retries): exponential backoff with jitter (`WithRetryBackoff`)
 
 `Retry-After` values above 24 hours are treated as 24 hours. The client stops retrying early, returning the last error, when the `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline, since the retry could not succeed anyway. If the context is done while waiting for a retry, the error wraps both the last error and the context error, so `errors.Is(err, context.Canceled)` and `errors.As(err, &apiErr)` both work.
@@ -146,23 +145,9 @@ These still work, but will be removed in a future major version:
 | `WithRetryPolicy(func(*resty.Response, error) bool)` | `WithRetryCondition(func(statusCode int, err error) bool)` |
 | `DefaultRetryPolicy` | `DefaultRetryCondition` |
 
-### Rate limit pacing
-
-The API limits alerts per Slack channel with a token bucket. By default, the client keeps its own copy of these buckets, so it can hold back a request the API would reject with 429 instead of sending it:
-
-- The bucket size and refill rate are learned from the `RateLimit-Limit` and `RateLimit-Policy` response headers. Nothing to configure
-- Each target (`SlackChannelID`, or `RouteKey` when no channel is set) has its own bucket, resynced from `RateLimit-Remaining` (or `Retry-After` on 429) after every response, so the API stays authoritative and alerts from other senders are accounted for
-- Before sending, the client waits until all targets of the request have enough tokens. Concurrent senders reserve tokens in turn, so they queue up instead of waking up together
-- If the wait exceeds `WithMaxRateLimitWait` or the context deadline, the request is not sent, and an `*APIError` with status 429, `NotSent: true` and the predicted wait in `RetryAfter` is returned
-- Until the limits are known, and for targets without recent alerts, nothing is delayed
-- An attempt that gets no response (e.g. connection refused) gives its tokens back, so retries while the API restarts are not delayed
-- Alerts the API ignores take no tokens. The client gives their tokens back from the response (`RateLimit-Remaining`, or its absence when all alerts of a request were ignored)
-
-When unsure, the client errs on the side of more tokens: it delays requests that would be rejected, and with rare exceptions (some alerts of a multi-channel request ignored) not requests that would succeed. Disable with `WithRateLimitPacing(false)`.
-
 ### Errors
 
-A non-2xx response (after retries) is returned as `*client.APIError`, with the status code, error message, `Retry-After` wait and number of attempts. `NotSent` is set when rate limit pacing did not send the request. Rate limiting, by the API or predicted by the client, matches `client.ErrRateLimited`:
+A non-2xx response (after retries) is returned as `*client.APIError`, with the status code, error message, `Retry-After` wait and number of attempts. Rate limiting (429) matches `client.ErrRateLimited`:
 
 ```go
 err := c.Send(ctx, alert)

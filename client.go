@@ -25,7 +25,6 @@ type Client struct {
 	options   *Options
 	connectMu sync.Mutex                 // serializes Connect
 	conn      atomic.Pointer[connection] // set when Connect succeeds
-	pacer     *pacer
 }
 
 // connection is the HTTP client of a connected [Client].
@@ -59,16 +58,10 @@ func New(baseURL string, opts ...Option) *Client {
 		o(options)
 	}
 
-	c := &Client{
+	return &Client{
 		baseURL: baseURL,
 		options: options,
 	}
-
-	if options.rateLimitPacing {
-		c.pacer = newPacer(time.Now)
-	}
-
-	return c
 }
 
 // Connect initializes the HTTP client and validates connectivity by pinging
@@ -123,12 +116,10 @@ func (c *Client) Send(ctx context.Context, alerts ...*types.Alert) error {
 // [Client.Connect] must be called first. Returns an error if the alerts slice is empty or
 // any element is nil.
 //
-// The returned *ResponseMetadata describes the response to the last attempt that was
-// sent, even on non-2xx. It is nil when that attempt got no response (a network-level
-// error), or when no attempt was sent: client-side rate limit pacing
-// ([WithRateLimitPacing]) did not send the first attempt, or the context was done while
-// pacing waited for it. When pacing does not send a retry, or the context is done while
-// waiting for a retry, it describes the response to the previous attempt.
+// The returned *ResponseMetadata describes the response to the last attempt, even on
+// non-2xx. It is nil when that attempt got no response (a network-level error). When the
+// context is done while waiting for a retry, it describes the response to the previous
+// attempt.
 //
 // When the context is done while waiting for a retry, the error wraps both the error of
 // the previous attempt (e.g. an [*APIError]) and the context error.
@@ -156,11 +147,6 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 		Alerts: c.withAlertClient(alerts),
 	}
 
-	var targets map[string]int
-	if c.pacer != nil {
-		targets = pacingTargets(alertsInput.Alerts)
-	}
-
 	body, err := json.Marshal(alertsInput)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal alerts list: %w", err)
@@ -169,7 +155,7 @@ func (c *Client) SendWithResponse(ctx context.Context, alerts ...*types.Alert) (
 	ctx, cancel := c.withSendTimeout(ctx)
 	defer cancel()
 
-	return c.post(ctx, conn.client, c.options.alertsEndpoint, body, targets)
+	return c.post(ctx, conn.client, c.options.alertsEndpoint, body)
 }
 
 // validateBaseURL checks that the base URL is an absolute http or https URL.
@@ -315,12 +301,12 @@ func redirectPolicy(maxRedirects int) resty.RedirectPolicyFunc {
 }
 
 func (c *Client) ping(ctx context.Context, client *resty.Client) error {
-	_, err := c.execute(ctx, client, http.MethodGet, c.options.pingEndpoint, nil, nil)
+	_, err := c.execute(ctx, client, http.MethodGet, c.options.pingEndpoint, nil)
 	return err
 }
 
-func (c *Client) post(ctx context.Context, client *resty.Client, path string, body []byte, targets map[string]int) (*ResponseMetadata, error) {
-	response, err := c.execute(ctx, client, http.MethodPost, path, body, targets)
+func (c *Client) post(ctx context.Context, client *resty.Client, path string, body []byte) (*ResponseMetadata, error) {
+	response, err := c.execute(ctx, client, http.MethodPost, path, body)
 	return responseMetadata(response), err
 }
 

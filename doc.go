@@ -39,23 +39,16 @@
 // behaviour.
 //
 // When a response has a Retry-After header, as the API's 429 responses
-// always do, the client waits exactly that long before retrying (up to
-// [WithMaxRateLimitWait]). Other retries use exponential backoff with jitter
+// always do, the client waits that long, plus a random extra of up to 20%,
+// before retrying (up to [WithMaxRateLimitWait]). Other retries use exponential backoff with jitter
 // ([WithRetryBackoff]). Retrying stops early when a Retry-After wait exceeds
 // [WithMaxRateLimitWait], or when any wait would pass the context deadline.
 // Without a context deadline, a call is limited to [WithSendTimeout] (default
 // 2 minutes).
 //
-// # Rate Limit Pacing
-//
-// The client mirrors the API's per-channel token bucket rate limiter, learned
-// from the RateLimit-Policy and RateLimit-* response headers, and waits before
-// sending a request the API would reject with 429. See [WithRateLimitPacing].
-//
 // # Errors
 //
-// Non-2xx responses are returned as [*APIError], as are requests that rate
-// limit pacing did not send ([APIError.NotSent]). Use [errors.Is] with
+// Non-2xx responses are returned as [*APIError]. Use [errors.Is] with
 // [ErrRateLimited] to detect rate limiting, and [APIError.RetryAfter] to
 // decide when to try again. When the context is done while waiting for a
 // retry, the error wraps both the error of the previous attempt and the
