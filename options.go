@@ -122,7 +122,8 @@ func WithRetryCount(count int) Option {
 // each wait is a random duration between half and all of the backoff
 // (jitter). It does not apply to responses with a Retry-After header, such as
 // the API's 429 responses, which wait for the header instead (see
-// [WithMaxRateLimitWait]). The default is 500ms initial and 3s max.
+// [WithMaxRateLimitWait]), except that initial is their minimum wait. The
+// default is 500ms initial and 3s max.
 //
 // initial must be 100ms–1 minute, and maxWait 100ms–5 minutes and at least
 // initial; this is validated by [Client.Connect].
@@ -161,6 +162,9 @@ func WithRetryMaxWaitTime(maxWaitTime time.Duration) Option {
 // before retrying a response with that header, such as the API's 429
 // responses. The client waits the time in the header, plus a random extra of
 // up to 20% so that concurrent requests do not all retry at the same moment.
+// A Retry-After shorter than the initial backoff ([WithRetryBackoff]), e.g. 0
+// or a date in the past, waits the initial backoff instead, so that the client
+// does not retry right away.
 //
 // If the Retry-After is longer than this, the client returns the [*APIError]
 // of the response right away, instead of a retry that could not succeed.
@@ -385,7 +389,8 @@ func WithMaxRedirects(n int) Option {
 // WithTLSConfig sets a custom TLS configuration for HTTPS connections. Use
 // this for custom CA certificates, mutual TLS (mTLS), or TLS version
 // constraints. The default is nil, which uses Go's default TLS settings.
-// Nil values are silently ignored.
+// The client uses a copy, so later changes to config have no effect. Nil
+// values are silently ignored.
 func WithTLSConfig(config *tls.Config) Option {
 	return func(o *Options) {
 		if config != nil {

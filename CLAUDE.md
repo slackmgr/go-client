@@ -89,7 +89,8 @@ Follows [Semantic Versioning](https://semver.org/):
 - `Client` - Main client wrapping resty.Client with Connect/Send methods
 - `Options` - Functional options pattern for configuration (retries, auth, logging)
 - `DefaultRetryCondition` - Retry condition that handles 429/5xx, connection errors and attempt timeouts; skips DNS errors, permanent connection errors, TLS verification errors and cancellation (`DefaultRetryPolicy`, `WithRetryPolicy`, `WithRetryWaitTime` and `WithRetryMaxWaitTime` are deprecated; successors are `DefaultRetryCondition`, `WithRetryCondition` and `WithRetryBackoff`)
-- `retry.go` - Client-side retry loop (resty retries are not used): honours `Retry-After` (plus up to 20% jitter) up to `maxRateLimitWait`, otherwise jittered exponential backoff; gives up early when the wait exceeds the max or the context deadline; `execute` builds the final error (`APIError` or wrapped transport error, joined with the context error when cancelled while waiting)
+- `retry.go` - Client-side retry loop (resty retries are not used): honours `Retry-After` (at least the initial backoff, plus up to 20% jitter) up to `maxRateLimitWait`, otherwise jittered exponential backoff; gives up early when the wait exceeds the max or the context deadline; `execute` builds the final error (`APIError` or wrapped transport error, joined with the context error when cancelled while waiting)
+- `newConnection` - Builds the `http.Transport` with the `http.DefaultTransport` settings (proxy from environment, dial/TLS handshake timeouts, HTTP/2) plus the pool options; the TLS config is cloned since HTTP/2 setup mutates it
 - `APIError` / `ErrRateLimited` - Typed error for non-2xx responses
 - `RequestLogger` - Interface for pluggable logging (NoopLogger default)
 

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/slackmgr/types"
 )
@@ -1300,4 +1302,71 @@ func TestClient_NilReceiver(t *testing.T) {
 	if err := c.Connect(t.Context()); err == nil {
 		t.Error("expected error from Connect on nil client")
 	}
+}
+
+func TestNewConnection_Transport(t *testing.T) {
+	t.Parallel()
+
+	t.Run("defaults", func(t *testing.T) {
+		t.Parallel()
+
+		transport := New("http://localhost").newConnection().transport
+
+		if transport.Proxy == nil {
+			t.Error("expected proxy from the environment")
+		}
+
+		if transport.DialContext == nil {
+			t.Error("expected dialer with timeout")
+		}
+
+		if !transport.ForceAttemptHTTP2 {
+			t.Error("expected HTTP/2 to be attempted")
+		}
+
+		if transport.TLSHandshakeTimeout != tlsHandshakeTimeout {
+			t.Errorf("expected TLSHandshakeTimeout=%v, got %v", tlsHandshakeTimeout, transport.TLSHandshakeTimeout)
+		}
+
+		if transport.ExpectContinueTimeout != expectContinueTimeout {
+			t.Errorf("expected ExpectContinueTimeout=%v, got %v", expectContinueTimeout, transport.ExpectContinueTimeout)
+		}
+
+		if transport.MaxIdleConns != defaultMaxIdleConns || transport.MaxConnsPerHost != defaultMaxConnsPerHost ||
+			transport.IdleConnTimeout != defaultIdleConnTimeout || transport.DisableKeepAlives {
+			t.Error("expected default connection pool settings")
+		}
+
+		if transport.TLSClientConfig != nil {
+			t.Errorf("expected nil TLS config, got %v", transport.TLSClientConfig)
+		}
+	})
+
+	t.Run("options", func(t *testing.T) {
+		t.Parallel()
+
+		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+
+		transport := New("http://localhost",
+			WithMaxIdleConns(5),
+			WithMaxConnsPerHost(3),
+			WithIdleConnTimeout(time.Minute),
+			WithDisableKeepAlive(true),
+			WithTLSConfig(tlsConfig),
+		).newConnection().transport
+
+		if transport.MaxIdleConns != 5 || transport.MaxConnsPerHost != 3 ||
+			transport.IdleConnTimeout != time.Minute || !transport.DisableKeepAlives {
+			t.Error("expected connection pool settings from the options")
+		}
+
+		// The transport must use a copy, as it modifies its TLS config for HTTP/2.
+		if transport.TLSClientConfig == tlsConfig {
+			t.Error("expected a copy of the TLS config")
+		}
+
+		if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+			t.Errorf("expected MinVersion TLS 1.3, got %v", transport.TLSClientConfig.MinVersion)
+		}
+	})
 }

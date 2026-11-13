@@ -8,17 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
-- Client-side rate limit pacing (`WithRateLimitPacing`, `APIError.NotSent`). Its model of the API's rate limiter could not be accurate (other senders, route key mapping, multiple API instances), and since the API accepts or rejects a request as a whole, a 429 is safe to retry. The client now relies on the `Retry-After` header of 429 responses
+- **Breaking:** Client-side rate limit pacing (`WithRateLimitPacing`, `APIError.NotSent`). Its model of the API's rate limiter could not be accurate (other senders, route key mapping, multiple API instances), and since the API accepts or rejects a request as a whole, a 429 is safe to retry. The client now relies on the `Retry-After` header of 429 responses
 
 ### Changed
 - `Retry-After` waits get a random extra of up to 20%, so that concurrent requests rejected together do not all retry at the same moment
 - `WithSendTimeout` also limits `Connect` and `Ping` when the context has no deadline
-- When the context is done while waiting for a retry (backoff, `Retry-After` or rate limit pacing), the error wraps both the error of the previous attempt and the context error, and `SendWithResponse` returns the metadata of the previous response. Previously, a cancelled backoff returned only the previous error, and a cancelled pacing wait only the context error, without metadata
+- When the context is done while waiting for a retry (backoff or `Retry-After`), the error wraps both the error of the previous attempt and the context error, and `SendWithResponse` returns the metadata of the previous response. Previously, a cancelled backoff returned only the previous error
+- A `Retry-After` shorter than the initial backoff of `WithRetryBackoff` (e.g. `0`, or a date in the past) waits the initial backoff, instead of retrying right away
+- The HTTP transport has the settings of `http.DefaultTransport`: dial and TLS handshake timeouts, and HTTP/2 (also with `WithTLSConfig`). The client uses a copy of the `WithTLSConfig` config
 - `Connect` rejects a base URL that is not an absolute `http` or `https` URL
 - `Close` and `RestyClient` are safe to call on a nil client; `Connect` returns an error for one
 - Docs: corrected the descriptions of when retrying stops early, which retries use backoff, and the errors returned when a wait would pass the context deadline
 
 ### Fixed
+- The `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` environment variables were ignored
 - `DefaultRetryCondition` retried errors that cannot succeed: server certificate verification failures, and a server that does not speak TLS
 - Exceeding `WithMaxRedirects` (including any redirect with `WithMaxRedirects(0)`) returned an error that was retried. The redirect response is now returned as an `APIError` with its 3xx status, which is not retried
 - `WithMaxRedirects(n)` followed only `n-1` redirects

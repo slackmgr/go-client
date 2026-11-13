@@ -92,7 +92,7 @@ All options are provided via `With*` constructor functions.
 |--------|---------|-------------|
 | `WithRetryCount(int)` | `3` | Maximum retries after the first attempt, for failures accepted by the retry condition (max 100, 0 disables) |
 | `WithRetryCondition(func(statusCode int, err error) bool)` | `DefaultRetryCondition` | Decides whether a failed attempt is retried (default: 429, 5xx, transient connection errors, timed out attempts). `statusCode` is 0 when no response was received |
-| `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries without `Retry-After` (5xx, connection errors, anything else the retry condition retries): starts at `initial`, doubles per retry up to `max`, each wait a random 50–100% of the backoff (initial 100ms–1min, max 100ms–5min). Not used for responses with `Retry-After`, such as the API's 429 |
+| `WithRetryBackoff(initial, max time.Duration)` | `500ms`, `3s` | Backoff for retries without `Retry-After` (5xx, connection errors, anything else the retry condition retries): starts at `initial`, doubles per retry up to `max`, each wait a random 50–100% of the backoff (initial 100ms–1min, max 100ms–5min). Not used for responses with `Retry-After`, such as the API's 429, except that `initial` is their minimum wait |
 | `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest `Retry-After` (e.g. of a 429) the client waits for before retrying (1s–10min). Longer waits return the error right away |
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
@@ -107,7 +107,7 @@ All options are provided via `With*` constructor functions.
 | `WithIdleConnTimeout(time.Duration)` | `90s` | How long idle connections remain in the pool (1s–5min) |
 | `WithDisableKeepAlive(bool)` | `false` | Disable HTTP keep-alive (new connection per request) |
 | `WithMaxRedirects(int)` | `10` | Maximum redirects to follow (0 disables redirects, max 20). A redirect beyond the maximum is returned as an `*APIError` with its 3xx status, and not retried |
-| `WithTLSConfig(*tls.Config)` | `nil` | Custom TLS configuration for mTLS, custom CAs, etc. |
+| `WithTLSConfig(*tls.Config)` | `nil` | Custom TLS configuration for mTLS, custom CAs, etc. The client uses a copy |
 | `WithAlertsEndpoint(string)` | `"alerts"` | API endpoint path for sending alerts |
 | `WithPingEndpoint(string)` | `"ping"` | API endpoint path for health checks |
 | `WithAlertClient(string)` | `""` | Client identifier (`Alert.Client`, e.g. the name of your monitoring tool) set on every sent alert that has none. The caller's alerts are not modified. Max 100 characters, checked by `Connect`. When empty, Slack Manager groups alerts by `Username` |
@@ -128,12 +128,14 @@ client.WithRetryCondition(func(statusCode int, err error) bool {
 
 Wait between attempts:
 
-- **Responses with `Retry-After`** (the API always sends it with 429): the client waits that long, plus a random extra of up to 20%, so that concurrent requests rejected together do not all retry at the same moment. `WithMaxRateLimitWait` limits this wait
+- **Responses with `Retry-After`** (the API always sends it with 429): the client waits that long, plus a random extra of up to 20%, so that concurrent requests rejected together do not all retry at the same moment. `WithMaxRateLimitWait` limits this wait. A shorter `Retry-After` than the initial backoff of `WithRetryBackoff` (e.g. `0`, or a date in the past) waits the initial backoff instead, so that it does not retry right away
 - **Everything else** (5xx and 429 responses without `Retry-After`, connection errors, failures a custom condition retries): exponential backoff with jitter (`WithRetryBackoff`)
 
 `Retry-After` values above 24 hours are treated as 24 hours. The client stops retrying early, returning the last error, when the `Retry-After` exceeds `WithMaxRateLimitWait`, or when the next wait would pass the context deadline, since the retry could not succeed anyway. If the context is done while waiting for a retry, the error wraps both the last error and the context error, so `errors.Is(err, context.Canceled)` and `errors.As(err, &apiErr)` both work.
 
 Retries are handled by the client itself, not resty, so requests made directly on `RestyClient()` are not retried.
+
+The HTTP transport has the settings of Go's `http.DefaultTransport`: it uses the proxy from the `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` environment variables, attempts HTTP/2, and has a 30s dial timeout and a 10s TLS handshake timeout. The connection pool options above apply on top.
 
 ### Deprecated options
 

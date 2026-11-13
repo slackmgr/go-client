@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,14 @@ type Client struct {
 	connectMu sync.Mutex                 // serializes Connect
 	conn      atomic.Pointer[connection] // set when Connect succeeds
 }
+
+// Transport settings, as in [http.DefaultTransport].
+const (
+	dialTimeout           = 30 * time.Second
+	dialKeepAlive         = 30 * time.Second
+	tlsHandshakeTimeout   = 10 * time.Second
+	expectContinueTimeout = 1 * time.Second
+)
 
 // connection is the HTTP client of a connected [Client].
 type connection struct {
@@ -251,13 +260,25 @@ func (c *Client) withSendTimeout(ctx context.Context) (context.Context, context.
 
 // newConnection creates the HTTP client from the options.
 func (c *Client) newConnection() *connection {
-	// Configure transport with connection pool settings
+	// The settings of http.DefaultTransport (proxy from the environment, dial and TLS handshake timeouts, HTTP/2),
+	// with the connection pool settings of the options.
+	dialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}
+
 	transport := &http.Transport{
-		MaxIdleConns:      c.options.maxIdleConns,
-		MaxConnsPerHost:   c.options.maxConnsPerHost,
-		IdleConnTimeout:   c.options.idleConnTimeout,
-		DisableKeepAlives: c.options.disableKeepAlive,
-		TLSClientConfig:   c.options.tlsConfig,
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ExpectContinueTimeout: expectContinueTimeout,
+		MaxIdleConns:          c.options.maxIdleConns,
+		MaxConnsPerHost:       c.options.maxConnsPerHost,
+		IdleConnTimeout:       c.options.idleConnTimeout,
+		DisableKeepAlives:     c.options.disableKeepAlive,
+		// Cloned, as the transport adds HTTP/2 to the NextProtos of its TLS config.
+		TLSClientConfig: c.options.tlsConfig.Clone(),
 	}
 
 	client := resty.New().

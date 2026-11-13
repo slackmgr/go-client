@@ -91,24 +91,40 @@ func TestRetry_RetryAfterNotCappedByRetryMaxWaitTime(t *testing.T) {
 	}
 }
 
-func TestRetry_PastRetryAfterDateRetriesImmediately(t *testing.T) {
+func TestRetry_ShortRetryAfterWaitsInitialBackoff(t *testing.T) {
 	t.Parallel()
 
-	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
-	server, count := sequenceServer(t, rateLimited(past), accepted)
-	c := connectedClient(t, server.URL, WithRetryBackoff(time.Second, 2*time.Second))
-
-	started := time.Now()
-	if err := c.Send(t.Context(), types.NewErrorAlert()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name       string
+		retryAfter string
+	}{
+		{"zero seconds", "0"},
+		{"past date", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)},
 	}
 
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Errorf("expected immediate retry, got %v", elapsed)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if count.Load() != 2 {
-		t.Errorf("expected 2 requests, got %d", count.Load())
+			server, count := sequenceServer(t, rateLimited(tt.retryAfter), rateLimited(tt.retryAfter), accepted)
+			c := connectedClient(t, server.URL, WithRetryBackoff(300*time.Millisecond, 2*time.Second))
+
+			started := time.Now()
+			if err := c.Send(t.Context(), types.NewErrorAlert()); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Two retries, each waiting the initial backoff (not the exponential backoff), plus at most 20% jitter.
+			if elapsed := time.Since(started); elapsed < 600*time.Millisecond {
+				t.Errorf("expected wait of at least 600ms, got %v", elapsed)
+			} else if elapsed > 1100*time.Millisecond {
+				t.Errorf("expected wait of at most 720ms plus slack, got %v", elapsed)
+			}
+
+			if count.Load() != 3 {
+				t.Errorf("expected 3 requests, got %d", count.Load())
+			}
+		})
 	}
 }
 

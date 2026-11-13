@@ -1,7 +1,9 @@
 // Package client provides an HTTP client for the Slack Manager API.
 //
 // The client wraps [github.com/go-resty/resty/v2] with automatic retries,
-// configurable connection pooling, and pluggable logging.
+// configurable connection pooling, and pluggable logging. Its HTTP transport
+// has the settings of [net/http.DefaultTransport], including the proxy from
+// the environment (HTTPS_PROXY, HTTP_PROXY, NO_PROXY).
 //
 // # Basic Usage
 //
@@ -39,9 +41,10 @@
 // behaviour.
 //
 // When a response has a Retry-After header, as the API's 429 responses
-// always do, the client waits that long, plus a random extra of up to 20%,
-// before retrying (up to [WithMaxRateLimitWait]). Other retries use exponential backoff with jitter
-// ([WithRetryBackoff]). Retrying stops early when a Retry-After wait exceeds
+// always do, the client waits that long (but at least the initial backoff of
+// [WithRetryBackoff]), plus a random extra of up to 20%, before retrying (up
+// to [WithMaxRateLimitWait]). Other retries use exponential backoff with
+// jitter ([WithRetryBackoff]). Retrying stops early when a Retry-After wait exceeds
 // [WithMaxRateLimitWait], or when any wait would pass the context deadline.
 // Without a context deadline, a call is limited to [WithSendTimeout] (default
 // 2 minutes).

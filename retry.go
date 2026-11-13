@@ -18,8 +18,8 @@ import (
 // the wrapped transport error otherwise. When the context is done while waiting for a retry, the error also wraps
 // the context error, so that both [errors.Is] with the context error and [errors.As] with the last error work.
 //
-// The wait between attempts is the Retry-After header value when present (up to maxRateLimitWait), plus up to
-// [retryAfterJitter] more, and capped exponential backoff with jitter otherwise. Retrying stops early when the API
+// The wait between attempts is the Retry-After header value when present (up to maxRateLimitWait), but at least the
+// initial backoff, plus up to [retryAfterJitter] more, and capped exponential backoff with jitter otherwise. Retrying stops early when the API
 // asks for a longer wait than maxRateLimitWait, or when the wait would exceed the context deadline, as the retry
 // could not succeed anyway.
 func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte) (*resty.Response, error) {
@@ -54,6 +54,9 @@ func (c *Client) execute(ctx context.Context, client *resty.Client, method, path
 				return response, lastErr
 			}
 
+			// A Retry-After of zero, or a date in the past, would otherwise retry right away, again and again if the
+			// API keeps responding the same way.
+			wait = max(wait, c.options.retryWaitTime)
 			wait += jitter(wait)
 		}
 
