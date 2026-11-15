@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-15
+
 ### Changed
 - Bumped `github.com/slackmgr/types` to v0.13.0: alerts are sent without zero-valued fields (e.g. no empty strings for unset `severity` or webhook `buttonStyle`). The API treats a missing field like the zero value, so this works with all API versions
 
@@ -242,7 +244,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WithTimeout`, `WithUserAgent`, `WithRequestHeader` options
 - `WithRequestLogger`, `WithRetryPolicy` options
 
-[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/slackmgr/go-client/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/slackmgr/go-client/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/slackmgr/go-client/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/slackmgr/go-client/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/slackmgr/go-client/compare/v0.4.0...v0.5.0
