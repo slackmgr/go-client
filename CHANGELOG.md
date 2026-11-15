@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Bumped `github.com/slackmgr/types` to v0.13.0: alerts are sent without zero-valued fields (e.g. no empty strings for unset `severity` or webhook `buttonStyle`). The API treats a missing field like the zero value, so this works with all API versions
+
 ## [0.6.0] - 2026-11-13
 
 ### Removed
