@@ -96,9 +96,10 @@ All options are provided via `With*` constructor functions.
 | `WithMaxRateLimitWait(time.Duration)` | `1m` | Longest `Retry-After` (e.g. of a 429) the client waits for before retrying (1s–10min). Longer waits return the error right away |
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
-| `WithAuthToken(string)` | — | Token for `Authorization` header (mutually exclusive with `WithBasicAuth`) |
-| `WithAuthScheme(string)` | `"Bearer"` | Authentication scheme used with `WithAuthToken` |
-| `WithBasicAuth(username, password string)` | — | HTTP Basic authentication (mutually exclusive with `WithAuthToken`) |
+| `WithAuthToken(string)` | — | Token for the `Authorization` header, e.g. a Slack Manager API key (mutually exclusive with the other auth options) |
+| `WithAuthTokenSource(func(ctx) (string, error))` | — | Function returning the token for each attempt, for expiring tokens such as OAuth2/OIDC access tokens (mutually exclusive with the other auth options). An error fails the send without retries |
+| `WithAuthScheme(string)` | `"Bearer"` | Authentication scheme used with `WithAuthToken` and `WithAuthTokenSource` |
+| `WithBasicAuth(username, password string)` | — | HTTP Basic authentication (mutually exclusive with the other auth options) |
 | `WithTimeout(time.Duration)` | `30s` | Timeout of a single HTTP request, i.e. one attempt (1s–5min). A timed out attempt is retried |
 | `WithSendTimeout(time.Duration)` | `2m` | Maximum total time of `Send`/`SendWithResponse`/`Ping`/`Connect`, including retries and waits, when the context has no deadline (0 disables, 1s–1h). A context deadline takes precedence |
 | `WithUserAgent(string)` | `"slack-manager-go-client/<version>"` | `User-Agent` header value. The default uses the module version from the build info (`dev` if unknown) |
@@ -111,6 +112,30 @@ All options are provided via `With*` constructor functions.
 | `WithAlertsEndpoint(string)` | `"alerts"` | API endpoint path for sending alerts |
 | `WithPingEndpoint(string)` | `"ping"` | API endpoint path for health checks |
 | `WithAlertClient(string)` | `""` | Client identifier (`Alert.Client`, e.g. the name of your monitoring tool) set on every sent alert that has none. The caller's alerts are not modified. Max 100 characters, checked by `Connect`. When empty, Slack Manager groups alerts by `Username` |
+
+### Authentication
+
+The Slack Manager API has optional authentication. When it is enabled, send an API key as a bearer token:
+
+```go
+c := client.New("https://slackmgr.example.com", client.WithAuthToken(os.Getenv("SLACKMGR_API_KEY")))
+```
+
+For OAuth2/OIDC access tokens (e.g. with a deployment that uses the `github.com/slackmgr/plugins/oidc` authenticator), use a token source that caches and refreshes the token, such as the client credentials flow of `golang.org/x/oauth2`:
+
+```go
+ts := (&clientcredentials.Config{ClientID: id, ClientSecret: secret, TokenURL: tokenURL, Scopes: []string{"alerts:write"}}).TokenSource(ctx)
+
+c := client.New("https://slackmgr.example.com", client.WithAuthTokenSource(func(context.Context) (string, error) {
+    token, err := ts.Token()
+    if err != nil {
+        return "", err
+    }
+    return token.AccessToken, nil
+}))
+```
+
+HTTP 401 and 403 responses are returned as an `*APIError` and are not retried by `DefaultRetryCondition`.
 
 ### Retry behaviour
 

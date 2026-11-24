@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ type Options struct {
 	basicAuthPassword string
 	authScheme        string
 	authToken         string
+	authTokenSource   func(ctx context.Context) (string, error)
 	timeout           time.Duration
 	userAgent         string
 	maxIdleConns      int
@@ -273,12 +275,43 @@ func WithAuthScheme(scheme string) Option {
 	}
 }
 
-// WithAuthToken sets the token sent in the Authorization header. Mutually
-// exclusive with [WithBasicAuth]; supplying both is rejected when
+// WithAuthToken sets the token sent in the Authorization header, e.g. a Slack
+// Manager API key. Mutually exclusive with [WithBasicAuth] and
+// [WithAuthTokenSource]; supplying more than one is rejected when
 // [Client.Connect] is called.
 func WithAuthToken(token string) Option {
 	return func(o *Options) {
 		o.authToken = token
+	}
+}
+
+// WithAuthTokenSource sets a function that returns the token sent in the
+// Authorization header (with the scheme of [WithAuthScheme]), for tokens that
+// expire, such as OAuth2 or OIDC access tokens. It is called before every
+// attempt, including retries, with the context of the send, so it must be
+// fast: cache the token and refresh it only when it is about to expire.
+//
+// With golang.org/x/oauth2 (e.g. the client credentials flow), wrap a token
+// source, which caches and refreshes the token:
+//
+//	ts := clientcredentials.Config{...}.TokenSource(ctx)
+//	client.WithAuthTokenSource(func(context.Context) (string, error) {
+//	    token, err := ts.Token()
+//	    if err != nil {
+//	        return "", err
+//	    }
+//	    return token.AccessToken, nil
+//	})
+//
+// If the function returns an error, the send fails with that error right
+// away, without retries. Mutually exclusive with [WithAuthToken] and
+// [WithBasicAuth]; supplying more than one is rejected when [Client.Connect]
+// is called. Nil values are silently ignored.
+func WithAuthTokenSource(source func(ctx context.Context) (string, error)) Option {
+	return func(o *Options) {
+		if source != nil {
+			o.authTokenSource = source
+		}
 	}
 }
 
@@ -486,6 +519,10 @@ func (o *Options) Validate() error {
 
 	if o.basicAuthUsername != "" && o.authToken != "" {
 		return errors.New("cannot use both basic auth and token auth - choose one")
+	}
+
+	if o.authTokenSource != nil && (o.basicAuthUsername != "" || o.authToken != "") {
+		return errors.New("cannot use an auth token source together with basic auth or token auth - choose one")
 	}
 
 	if o.timeout < minTimeout {

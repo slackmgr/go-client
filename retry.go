@@ -29,6 +29,15 @@ func (c *Client) execute(ctx context.Context, client *resty.Client, method, path
 			request.SetBody(body)
 		}
 
+		if source := c.options.authTokenSource; source != nil {
+			token, err := source(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s %s failed: failed to get auth token: %w", method, path, err)
+			}
+
+			request.SetAuthScheme(c.options.authScheme).SetAuthToken(token)
+		}
+
 		response, err := request.Execute(method, path)
 
 		var lastErr error

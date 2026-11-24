@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
@@ -733,6 +734,22 @@ func TestOptionsValidate(t *testing.T) {
 				o.authToken = "token"
 			},
 			wantError: "cannot use both basic auth and token auth - choose one",
+		},
+		{
+			name: "token source and token",
+			modify: func(o *Options) {
+				o.authTokenSource = func(context.Context) (string, error) { return "t", nil }
+				o.authToken = "token"
+			},
+			wantError: "cannot use an auth token source together with basic auth or token auth - choose one",
+		},
+		{
+			name: "token source and basic auth",
+			modify: func(o *Options) {
+				o.authTokenSource = func(context.Context) (string, error) { return "t", nil }
+				o.basicAuthUsername = "user"
+			},
+			wantError: "cannot use an auth token source together with basic auth or token auth - choose one",
 		},
 		{
 			name:      "timeout below minimum",

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `WithAuthTokenSource(func(ctx context.Context) (string, error))`: gets the `Authorization` token before every attempt (including retries), for expiring tokens such as OAuth2/OIDC access tokens, e.g. from a `golang.org/x/oauth2` token source. An error fails the send without retries. Mutually exclusive with `WithAuthToken` and `WithBasicAuth`
+- README: Authentication section (API keys and OAuth2/OIDC access tokens)
+
 ## [0.6.1] - 2026-11-15
 
 ### Changed
