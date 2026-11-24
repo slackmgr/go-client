@@ -289,7 +289,9 @@ func WithAuthToken(token string) Option {
 // Authorization header (with the scheme of [WithAuthScheme]), for tokens that
 // expire, such as OAuth2 or OIDC access tokens. It is called before every
 // attempt, including retries, with the context of the send, so it must be
-// fast: cache the token and refresh it only when it is about to expire.
+// fast: cache the token and refresh it only when it is about to expire. It is
+// not called for pings ([Client.Connect] and [Client.Ping]), since the ping
+// endpoint of the API is public.
 //
 // With golang.org/x/oauth2 (e.g. the client credentials flow), wrap a token
 // source, which caches and refreshes the token:
@@ -303,8 +305,8 @@ func WithAuthToken(token string) Option {
 //	    return token.AccessToken, nil
 //	})
 //
-// If the function returns an error, the send fails with that error right
-// away, without retries. Mutually exclusive with [WithAuthToken] and
+// If the function returns an error, or an empty token ([ErrEmptyAuthToken]),
+// the send fails right away, without retries. Mutually exclusive with [WithAuthToken] and
 // [WithBasicAuth]; supplying more than one is rejected when [Client.Connect]
 // is called. Nil values are silently ignored.
 func WithAuthTokenSource(source func(ctx context.Context) (string, error)) Option {

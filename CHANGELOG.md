@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `Connect` and `Ping` no longer call the `WithAuthTokenSource` function, since the ping endpoint of the API is public. `Connect` no longer fails when the identity provider is unavailable; a failing token source surfaces at the first send instead
+
+### Fixed
+- An empty token from `WithAuthTokenSource` fails the send with `ErrEmptyAuthToken`, without retries. Before, the request was sent without an `Authorization` header
+
 ## [0.7.0] - 2026-11-24
 
 ### Added

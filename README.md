@@ -97,7 +97,7 @@ All options are provided via `With*` constructor functions.
 | `WithRequestLogger(RequestLogger)` | `NoopLogger` | Logger for HTTP requests and errors |
 | `WithRequestHeader(header, value string)` | — | Add a custom header to all requests |
 | `WithAuthToken(string)` | — | Token for the `Authorization` header, e.g. a Slack Manager API key (mutually exclusive with the other auth options) |
-| `WithAuthTokenSource(func(ctx) (string, error))` | — | Function returning the token for each attempt, for expiring tokens such as OAuth2/OIDC access tokens (mutually exclusive with the other auth options). An error fails the send without retries |
+| `WithAuthTokenSource(func(ctx) (string, error))` | — | Function returning the token for each attempt, for expiring tokens such as OAuth2/OIDC access tokens (mutually exclusive with the other auth options). An error, or an empty token, fails the send without retries. Not used for pings (`Connect`, `Ping`), since the ping endpoint is public |
 | `WithAuthScheme(string)` | `"Bearer"` | Authentication scheme used with `WithAuthToken` and `WithAuthTokenSource` |
 | `WithBasicAuth(username, password string)` | — | HTTP Basic authentication (mutually exclusive with the other auth options) |
 | `WithTimeout(time.Duration)` | `30s` | Timeout of a single HTTP request, i.e. one attempt (1s–5min). A timed out attempt is retried |

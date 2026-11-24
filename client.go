@@ -79,6 +79,10 @@ func New(baseURL string, opts ...Option) *Client {
 // concurrent use. Once Connect has succeeded, further calls return nil without
 // doing anything. If it fails, the client stays unconnected and Connect can be
 // called again, e.g. after the API has become available.
+//
+// The ping is sent without the token of [WithAuthTokenSource] (the ping
+// endpoint of the API is public), so Connect does not fail when the identity
+// provider is unavailable. A failing token source surfaces at the first send.
 func (c *Client) Connect(ctx context.Context) error {
 	if c == nil {
 		return errors.New("alert client is nil")
@@ -215,7 +219,8 @@ func (c *Client) Close() {
 // Ping checks connectivity to the API, with retries (see [WithRetryCount]).
 // [Client.Connect] must be called first. Use this to verify the connection is
 // still healthy after the initial connect. Like [Client.Send], it is limited
-// to [WithSendTimeout] when ctx has no deadline.
+// to [WithSendTimeout] when ctx has no deadline. Like Connect, it does not
+// send the token of [WithAuthTokenSource].
 func (c *Client) Ping(ctx context.Context) error {
 	if c == nil {
 		return errors.New("alert client is nil")
@@ -322,12 +327,14 @@ func redirectPolicy(maxRedirects int) resty.RedirectPolicyFunc {
 }
 
 func (c *Client) ping(ctx context.Context, client *resty.Client) error {
-	_, err := c.execute(ctx, client, http.MethodGet, c.options.pingEndpoint, nil)
+	// The ping endpoint of the API is public: do not fetch a token, so that pings (and Connect) do not depend on
+	// the identity provider.
+	_, err := c.execute(ctx, client, http.MethodGet, c.options.pingEndpoint, nil, false)
 	return err
 }
 
 func (c *Client) post(ctx context.Context, client *resty.Client, path string, body []byte) (*ResponseMetadata, error) {
-	response, err := c.execute(ctx, client, http.MethodPost, path, body)
+	response, err := c.execute(ctx, client, http.MethodPost, path, body, true)
 	return responseMetadata(response), err
 }
 

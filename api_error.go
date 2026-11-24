@@ -11,6 +11,10 @@ import (
 // Use [errors.As] to get the [*APIError] itself, for example to read [APIError.RetryAfter].
 var ErrRateLimited = errors.New("rate limited")
 
+// ErrEmptyAuthToken is returned (wrapped) when the function of [WithAuthTokenSource] returns an empty token
+// without an error. The request is not sent, since it would have no credentials.
+var ErrEmptyAuthToken = errors.New("auth token source returned an empty token")
+
 // APIError is returned by [Client.Send], [Client.SendWithResponse] and [Client.Ping] (and wrapped by
 // [Client.Connect]) when the API responds with a non-2xx status code, after any retries. When the context is
 // done while waiting for a retry, it is wrapped together with the context error.

@@ -22,17 +22,24 @@ import (
 // initial backoff, plus up to [retryAfterJitter] more, and capped exponential backoff with jitter otherwise. Retrying stops early when the API
 // asks for a longer wait than maxRateLimitWait, or when the wait would exceed the context deadline, as the retry
 // could not succeed anyway.
-func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte) (*resty.Response, error) {
+//
+// If useTokenSource is true, the token of [WithAuthTokenSource] (if set) is sent with each attempt.
+func (c *Client) execute(ctx context.Context, client *resty.Client, method, path string, body []byte, useTokenSource bool) (*resty.Response, error) {
 	for attempt := 1; ; attempt++ {
 		request := client.R().SetContext(ctx)
 		if body != nil {
 			request.SetBody(body)
 		}
 
-		if source := c.options.authTokenSource; source != nil {
+		if source := c.options.authTokenSource; source != nil && useTokenSource {
 			token, err := source(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("%s %s failed: failed to get auth token: %w", method, path, err)
+			}
+
+			// An empty token would silently send the request without credentials.
+			if strings.TrimSpace(token) == "" {
+				return nil, fmt.Errorf("%s %s failed: %w", method, path, ErrEmptyAuthToken)
 			}
 
 			request.SetAuthScheme(c.options.authScheme).SetAuthToken(token)

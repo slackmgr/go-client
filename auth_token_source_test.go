@@ -61,7 +61,7 @@ func TestAuthTokenSource_SetsTokenOnEveryAttempt(t *testing.T) {
 	var calls atomic.Int32
 
 	source := func(ctx context.Context) (string, error) {
-		if ctx.Value(ctxKey{}) != "send" && ctx.Value(ctxKey{}) != "connect" {
+		if ctx.Value(ctxKey{}) != "send" {
 			return "", errors.New("unexpected context")
 		}
 
@@ -81,7 +81,7 @@ func TestAuthTokenSource_SetsTokenOnEveryAttempt(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	want := []string{"GET Bearer token-1", "POST Bearer token-2", "POST Bearer token-3"}
+	want := []string{"GET ", "POST Bearer token-1", "POST Bearer token-2"} // the ping is sent without a token
 	if strings.Join(headers, "|") != strings.Join(want, "|") {
 		t.Errorf("expected headers %v, got %v", want, headers)
 	}
@@ -102,6 +102,10 @@ func TestAuthTokenSource_UsesAuthScheme(t *testing.T) {
 
 	if err := client.Connect(context.Background()); err != nil {
 		t.Fatalf("connect failed: %v", err)
+	}
+
+	if err := client.Send(context.Background(), types.NewInfoAlert()); err != nil {
+		t.Fatalf("send failed: %v", err)
 	}
 
 	if got := authHeader.Load(); got != "Token abc" {
@@ -125,11 +129,7 @@ func TestAuthTokenSource_ErrorFailsWithoutRetry(t *testing.T) {
 	var calls atomic.Int32
 
 	source := func(context.Context) (string, error) {
-		// Succeed for Connect, fail for Send.
-		if calls.Add(1) == 1 {
-			return "ok", nil
-		}
-
+		calls.Add(1)
 		return "", tokenErr
 	}
 
@@ -148,11 +148,95 @@ func TestAuthTokenSource_ErrorFailsWithoutRetry(t *testing.T) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 
-	if got := calls.Load(); got != 2 {
-		t.Errorf("expected 2 token source calls (no retries), got %d", got)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("expected 1 token source call (no retries, none for the ping), got %d", got)
 	}
 
 	if got := requests.Load(); got != 1 {
 		t.Errorf("expected only the connect request to reach the server, got %d", got)
+	}
+}
+
+func TestAuthTokenSource_EmptyTokenFailsWithoutRequest(t *testing.T) {
+	t.Parallel()
+
+	for _, token := range []string{"", "  "} {
+		var requests atomic.Int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		var calls atomic.Int32
+
+		source := func(context.Context) (string, error) {
+			calls.Add(1)
+			return token, nil
+		}
+
+		client := New(server.URL, WithAuthTokenSource(source), WithRetryCount(3))
+
+		if err := client.Connect(context.Background()); err != nil {
+			server.Close()
+			t.Fatalf("connect failed: %v", err)
+		}
+
+		err := client.Send(context.Background(), types.NewInfoAlert())
+
+		server.Close()
+
+		if !errors.Is(err, ErrEmptyAuthToken) {
+			t.Fatalf("token %q: expected ErrEmptyAuthToken, got %v", token, err)
+		}
+
+		if got := calls.Load(); got != 1 {
+			t.Errorf("token %q: expected 1 token source call (no retries, none for the ping), got %d", token, got)
+		}
+
+		if got := requests.Load(); got != 1 {
+			t.Errorf("token %q: expected only the connect request to reach the server, got %d", token, got)
+		}
+	}
+}
+
+func TestAuthTokenSource_NotUsedForPing(t *testing.T) {
+	t.Parallel()
+
+	var authHeaders atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authHeaders.Add(1)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var calls atomic.Int32
+
+	// An unavailable identity provider must not fail Connect or Ping.
+	source := func(context.Context) (string, error) {
+		calls.Add(1)
+		return "", errors.New("token endpoint unavailable")
+	}
+
+	client := New(server.URL, WithAuthTokenSource(source))
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("connect failed: %v", err)
+	}
+
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("ping failed: %v", err)
+	}
+
+	if got := calls.Load(); got != 0 {
+		t.Errorf("expected no token source calls, got %d", got)
+	}
+
+	if got := authHeaders.Load(); got != 0 {
+		t.Errorf("expected no Authorization headers, got %d", got)
 	}
 }
